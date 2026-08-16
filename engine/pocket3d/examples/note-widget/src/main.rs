@@ -177,7 +177,7 @@ impl NoteGame {
         for key in input.edits() {
             let named = match key {
                 EditKey::Char(c) => {
-                    if !input.super_down() {
+                    if !input.primary_down() {
                         chars.push(*c);
                     }
                     continue;
@@ -299,25 +299,29 @@ impl FlatWidget for NoteGame {
             self.send_hello();
         }
 
-        // ⌘Q / ⌘W quit (the widget has no titlebar close button).
+        // ⌘Q / ⌘W quit — the macOS widget has no titlebar close button; a
+        // decorated window quits through its own close control.
         if input.super_down()
             && (input.key_pressed(KeyCode::KeyQ) || input.key_pressed(KeyCode::KeyW))
         {
             self.exit = true;
         }
-        // ⌘Z / ⇧⌘Z / ⌘C → guest editing chords (chars are suppressed
-        // under ⌘, so chords travel as named keys).
-        if input.super_down() && input.key_pressed(KeyCode::KeyZ) {
+        // Primary+Z / +C / +X / +V → guest editing chords (chars are
+        // suppressed under the primary modifier, so chords travel as named
+        // keys). primary_down() is Command on macOS and Control elsewhere —
+        // super (Command on macOS, the Windows key on Windows) would leave
+        // Ctrl+C/V dead on non-Apple hosts.
+        if input.primary_down() && input.key_pressed(KeyCode::KeyZ) {
             let redo = input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::ShiftRight);
             self.svc(serde_json::json!({"t": "key", "k": if redo { "Redo" } else { "Undo" }}));
         }
-        if input.super_down() && input.key_pressed(KeyCode::KeyC) {
+        if input.primary_down() && input.key_pressed(KeyCode::KeyC) {
             self.svc(serde_json::json!({"t": "key", "k": "Copy"}));
         }
-        if input.super_down() && input.key_pressed(KeyCode::KeyX) {
+        if input.primary_down() && input.key_pressed(KeyCode::KeyX) {
             self.svc(serde_json::json!({"t": "key", "k": "Cut"}));
         }
-        if input.super_down()
+        if input.primary_down()
             && input.key_pressed(KeyCode::KeyV)
             && let Some(text) = clipboard_paste()
             && !text.is_empty()
