@@ -69,6 +69,8 @@ pub struct Input {
     /// A super/command chord is held — edit consumers usually skip
     /// `Char` events while true (they are shortcuts, not typing).
     super_down: bool,
+    /// The control key is held — the primary shortcut modifier off macOS.
+    control_down: bool,
 }
 
 fn button_id(b: MouseButton) -> u8 {
@@ -118,6 +120,10 @@ impl Input {
                             self.super_down = true;
                             None
                         }
+                        Key::Named(NamedKey::Control) => {
+                            self.control_down = true;
+                            None
+                        }
                         _ => None,
                     };
                     if let Some(k) = named {
@@ -129,6 +135,8 @@ impl Input {
                     }
                 } else if matches!(&event.logical_key, Key::Named(NamedKey::Super)) {
                     self.super_down = false;
+                } else if matches!(&event.logical_key, Key::Named(NamedKey::Control)) {
+                    self.control_down = false;
                 }
             }
             WindowEvent::Ime(ime) => {
@@ -198,6 +206,7 @@ impl Input {
         self.scroll_ended = true;
         self.interaction_cancelled = true;
         self.super_down = false;
+        self.control_down = false;
     }
 
     /// Call once per simulation turn, after game logic consumed edge state.
@@ -254,6 +263,26 @@ impl Input {
         self.super_down
     }
 
+    /// A control key is currently held.
+    pub fn control_down(&self) -> bool {
+        self.control_down
+    }
+
+    /// The platform's PRIMARY shortcut modifier is held: Command on macOS,
+    /// Control everywhere else. Shortcut chords (quit, copy, paste, undo,
+    /// select-all, …) must key off this — never `super_down` — or Windows
+    /// and Linux bind the chords to the Windows/OS key instead of Ctrl.
+    pub fn primary_down(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.super_down
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.control_down
+        }
+    }
+
     pub fn key_down(&self, code: KeyCode) -> bool {
         self.down.contains(&code)
     }
@@ -273,6 +302,14 @@ impl Input {
     // --- synthetic injection (headless scripting/tests) -------------------
 
     pub fn inject_key(&mut self, code: KeyCode, down: bool) {
+        // Modifier logical state mirrors the real event path: super/control
+        // keys set their held flag (on_window_event does the same from the
+        // logical key).
+        match code {
+            KeyCode::SuperLeft | KeyCode::SuperRight => self.super_down = down,
+            KeyCode::ControlLeft | KeyCode::ControlRight => self.control_down = down,
+            _ => {}
+        }
         if down {
             if self.down.insert(code) {
                 self.pressed.insert(code);
@@ -321,6 +358,26 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_modifier_is_control_off_macos() {
+        let mut input = Input::default();
+        input.inject_key(KeyCode::ControlLeft, true);
+        assert!(input.control_down());
+        assert_eq!(input.primary_down(), cfg!(not(target_os = "macos")));
+
+        // A held modifier produces no edit stream entries by itself.
+        assert!(input.edits().is_empty());
+
+        input.inject_key(KeyCode::ControlLeft, false);
+        assert!(!input.control_down());
+        assert!(!input.primary_down());
+
+        // clear() drops held modifiers too.
+        input.inject_key(KeyCode::ControlLeft, true);
+        input.clear();
+        assert!(!input.primary_down());
+    }
 
     #[test]
     fn end_frame_consumes_edges_but_preserves_held_state() {
