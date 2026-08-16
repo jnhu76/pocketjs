@@ -1,0 +1,41 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.acceptance",
+  "name": "pocket-acceptance",
+  "title": "Pocket Acceptance",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "text.glyphs.baked",
+        "input.buttons"
+      ],
+      "enhances": [
+        "input.text",
+        "input.pointer",
+        "input.ime",
+        "host.clipboard",
+        "display.viewport.live",
+        "text.glyphs.runtime"
+      ]
+    }
+  },
+  "app": {
+    "entry": "apps/acceptance/main.tsx",
+    "output": "acceptance-main",
+    "framework": "solid",
+    "viewport": {
+      "dynamic": {
+        "default": [
+          1000,
+          700
+        ],
+        "min": [
+          240,
+          180
+        ]
+      }
+    }
+  }
+}
