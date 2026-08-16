@@ -694,7 +694,11 @@ fn resolve_asset(explicit: Option<PathBuf>, app: &str, ext: &str) -> Result<Path
 
 fn note_file(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        // HOME is canonical on POSIX; Windows shells often leave it unset,
+        // so fall through to USERPROFILE (the real Windows home).
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
         Path::new(&home).join(".pocket-note.md")
     })
 }
