@@ -170,8 +170,8 @@ impl NoteGame {
     }
 
     fn forward_edits(&mut self, input: &Input) {
-        // Batch runs of typed chars into one line; ⌘-chords are shortcuts,
-        // not text.
+        // Batch runs of typed chars into one line; primary-modifier chords
+        // are shortcuts, not text.
         let shift = input.key_down(KeyCode::ShiftLeft) || input.key_down(KeyCode::ShiftRight);
         let mut chars = String::new();
         for key in input.edits() {
@@ -186,6 +186,11 @@ impl NoteGame {
                 EditKey::Delete => "Delete",
                 EditKey::Enter => "Enter",
                 EditKey::Tab => "Tab",
+                // Primary+Left/Right word-dance (Command/Control+arrow): the
+                // chord is a named key like Copy/Cut — the plain Left/Right
+                // under the primary modifier is the shortcut, not a move.
+                EditKey::Left if input.primary_down() => "WordLeft",
+                EditKey::Right if input.primary_down() => "WordRight",
                 EditKey::Left => "Left",
                 EditKey::Right => "Right",
                 EditKey::Up => "Up",

@@ -15,7 +15,9 @@
 //   {t:"ch", s}                typed characters (batched, layout applied)
 //   {t:"key", k}               named key: Backspace Delete Enter Tab Left
 //                              Right Up Down Home End PageUp PageDown Escape
-//                              Copy Cut Undo Redo (⌘-chords arrive as keys)
+//                              Copy Cut Undo Redo WordLeft WordRight
+//                              (primary-modifier chords arrive as keys:
+//                              ⌘C/⌘X/⌘Z/⇧⌘Z/⌘V and ⌘/Ctrl+arrow word-dance)
 //   {t:"paste", text}          insert the system clipboard (⌘V — the host
 //                              reads it and pushes the text)
 //   {t:"ime", s, c}            IME composition: preedit text + caret char
