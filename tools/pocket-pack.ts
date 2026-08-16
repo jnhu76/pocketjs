@@ -16,6 +16,7 @@
 // with a log under --all-targets): a package can never carry a variant its
 // own manifest disowns.
 
+import { fsPath } from "./fs-url.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { POCKET_TARGETS } from "../contracts/spec/platforms.ts";
@@ -33,7 +34,7 @@ import {
   type PocketPackageVariant,
 } from "../contracts/spec/pocket-package.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fsPath("..", import.meta.url);
 
 function usage(message?: string): never {
   if (message) console.error(`pocket-pack: ${message}`);

@@ -18,13 +18,14 @@
 //   bun tools/gen-demo-covers.ts hero music           (a subset)
 //   bun tools/gen-demo-covers.ts --framework=octane   (the Octane twins)
 
+import { fsPath } from "./fs-url.ts";
 import { createCanvas, GlobalFonts, type SKRSContext2D } from "@napi-rs/canvas";
 import { mkdirSync } from "node:fs";
 import { runScenario } from "../hosts/sim/sim.ts";
 import { BTN } from "../contracts/spec/spec.ts";
 import { FRAMEWORKS, parseFramework } from "../framework/compiler/jsx-plugin.ts";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fsPath("../", import.meta.url);
 GlobalFonts.registerFromPath(ROOT + "assets/fonts/Inter-Bold.ttf", "Inter");
 
 interface DemoCover {

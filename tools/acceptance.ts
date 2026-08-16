@@ -19,12 +19,13 @@
 // input.ime, host.clipboard, text.glyphs.runtime, …) are baked. A
 // provisional windows-app profile is the W1-G proposal, not yet a
 // registered contract — see the W1 report.
+import { fsPath } from "./fs-url.ts";
 import { mkdirSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { $ } from "bun";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fsPath("..", import.meta.url);
 const args = process.argv.slice(2).filter((a) => a !== "--");
 const pass = args;
 

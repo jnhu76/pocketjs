@@ -1,3 +1,4 @@
+import { fsPath } from "./fs-url.ts";
 import { createHash } from "node:crypto";
 import {
   createReadStream,
@@ -44,7 +45,7 @@ import {
   stageSymbianMassStorageData,
 } from "./symbian-data.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fsPath("..", import.meta.url);
 
 async function spawn(
   command: string,

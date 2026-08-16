@@ -28,13 +28,18 @@ import babelCorePkg from "@babel/core/package.json";
 import tsPresetPkg from "@babel/preset-typescript/package.json";
 import type { PocketFramework } from "../src/config.ts";
 import { POCKET_FRAMEWORKS, SUBPATHS } from "./subpaths.ts";
+import { fileURLToPath } from "node:url";
 
 export type { PocketFramework };
 
-export const RENDERER_PATH = new URL("../src/renderer.ts", import.meta.url).pathname;
-export const RENDERER_SOLID_PATH = new URL("../src/renderer-solid.ts", import.meta.url).pathname;
-export const RENDERER_VUE_VAPOR_PATH = new URL("../src/renderer-vue-vapor.ts", import.meta.url).pathname;
-export const RENDERER_OCTANE_PATH = new URL("../src/renderer-octane.ts", import.meta.url).pathname;
+// Every path below feeds node:fs / Bun.file — these are FILESYSTEM paths,
+// so they convert with fileURLToPath, never URL.pathname (which yields
+// "/C:/…" on Windows and breaks every fs API).
+
+export const RENDERER_PATH = fileURLToPath(new URL("../src/renderer.ts", import.meta.url));
+export const RENDERER_SOLID_PATH = fileURLToPath(new URL("../src/renderer-solid.ts", import.meta.url));
+export const RENDERER_VUE_VAPOR_PATH = fileURLToPath(new URL("../src/renderer-vue-vapor.ts", import.meta.url));
+export const RENDERER_OCTANE_PATH = fileURLToPath(new URL("../src/renderer-octane.ts", import.meta.url));
 
 /**
  * subpath -> absolute module file, per framework — derived once from the
@@ -53,35 +58,32 @@ const RESOLVED: Record<PocketFramework, Record<string, string>> = (() => {
   for (const [name, decl] of Object.entries(SUBPATHS)) {
     for (const fw of POCKET_FRAMEWORKS) {
       const rel = typeof decl.file === "string" ? decl.file : decl.file[fw];
-      if (rel) out[fw][name] = new URL(rel, root).pathname;
+      if (rel) out[fw][name] = fileURLToPath(new URL(rel, root));
     }
   }
   return out;
 })();
-const OCTANE_PROFILING_STUB_PATH = new URL(
-  "../src/octane-profiling-stub.ts",
-  import.meta.url,
-).pathname;
-const GENERATED_STYLES_PATH = new URL(
-  "../src/styles.generated.ts",
-  import.meta.url,
-).pathname;
-const VUE_VAPOR_RUNTIME_PATH = new URL(
-  "../../node_modules/vue/dist/vue.runtime-with-vapor.esm-browser.prod.js",
-  import.meta.url,
-).pathname;
-const SOLID_RUNTIME_PATH = new URL(
-  "../../node_modules/solid-js/dist/solid.js",
-  import.meta.url,
-).pathname;
-const SOLID_UNIVERSAL_RUNTIME_PATH = new URL(
-  "../../node_modules/solid-js/universal/dist/universal.js",
-  import.meta.url,
-).pathname;
+const OCTANE_PROFILING_STUB_PATH = fileURLToPath(
+  new URL("../src/octane-profiling-stub.ts", import.meta.url),
+);
+const GENERATED_STYLES_PATH = fileURLToPath(
+  new URL("../src/styles.generated.ts", import.meta.url),
+);
+const VUE_VAPOR_RUNTIME_PATH = fileURLToPath(
+  new URL("../../node_modules/vue/dist/vue.runtime-with-vapor.esm-browser.prod.js", import.meta.url),
+);
+const SOLID_RUNTIME_PATH = fileURLToPath(
+  new URL("../../node_modules/solid-js/dist/solid.js", import.meta.url),
+);
+const SOLID_UNIVERSAL_RUNTIME_PATH = fileURLToPath(
+  new URL("../../node_modules/solid-js/universal/dist/universal.js", import.meta.url),
+);
 
 const PACKAGE_NAME = "@pocketjs/framework";
-const CACHE_DIR = new URL("../../.cache/transforms/", import.meta.url).pathname;
+const CACHE_DIR = fileURLToPath(new URL("../../.cache/transforms/", import.meta.url));
 const CACHE_VERSION = "2"; // manual backstop; compiler sources are hashed in below
+// URL semantics on purpose: COMPILER_DIR prefix-matches url.pathname below,
+// so it must stay a pathname, not a filesystem path.
 const COMPILER_DIR = new URL("./", import.meta.url).pathname;
 
 /**

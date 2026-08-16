@@ -15,6 +15,7 @@
 //
 // Shortcuts while running:  o open panel · r rebuild + relaunch · q quit
 
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
@@ -22,7 +23,7 @@ import { join } from "node:path";
 import { startDevServer, demoManifest } from "../hosts/web/server.ts";
 import { startBridge, type Bridge } from "./devtools-bridge.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fsPath("..", import.meta.url);
 
 // ---- args -------------------------------------------------------------------
 

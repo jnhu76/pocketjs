@@ -9,6 +9,7 @@
 //   PSP_SDK=/path/to/mipsel-sony-psp bun tools/bench-ppsspp.ts --apps=all --samples=3 --memory-scan
 //   bun tools/bench-ppsspp.ts --apps=all --frameworks=solid,vue-vapor,octane --samples=7 --bootstrap=5000
 
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -99,7 +100,7 @@ const SPECS: Spec[] = [
   },
 ];
 
-const pspUiDir = new URL("..", import.meta.url).pathname;
+const pspUiDir = fsPath("..", import.meta.url);
 const argv = Bun.argv.slice(2);
 let samples = 5;
 let apps = ["stats"];

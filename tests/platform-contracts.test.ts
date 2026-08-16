@@ -360,6 +360,7 @@ describe("semantic resolution", () => {
       stats: [true, true, false],
       "vue-sfc-lab": [true, true, false],
       zoomlab: [true, true, false],
+      acceptance: [false, false, true], // the generic desktop acceptance app — a macos-widget-only surface
     };
     const targets = ["psp", "vita", "macos-widget"] as const;
     for (const demo of readdirSync(new URL("../apps/", import.meta.url)).sort()) {

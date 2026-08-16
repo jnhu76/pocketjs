@@ -23,12 +23,13 @@
 // assertion sometimes fails; V's delivery frame is one number, every run.
 // Same code. The only difference is what "time" means.
 
+import { fsPath } from "./fs-url.ts";
 import { writeFileSync } from "node:fs";
 import { bootWorld, runScenario } from "../hosts/sim/sim.ts";
 import { BTN } from "../contracts/spec/spec.ts";
 
 const RUNS = Number(argValue("--runs") ?? 60);
-const OUT = argValue("--out") ?? new URL("../dist/flake-lab.json", import.meta.url).pathname;
+const OUT = argValue("--out") ?? fsPath("../dist/flake-lab.json", import.meta.url);
 
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);

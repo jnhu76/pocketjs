@@ -1,3 +1,4 @@
+import { fsPath } from "./fs-url.ts";
 import { createHash } from "node:crypto";
 import {
   createReadStream,
@@ -19,7 +20,7 @@ import {
 } from "./symbian-toolchain.ts";
 import { pocketStackCacheRoot, withArtifactLock } from "./psp-toolchain.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fsPath("..", import.meta.url);
 
 async function sha256File(path: string): Promise<string> {
   const hash = createHash("sha256");

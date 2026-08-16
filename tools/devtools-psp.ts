@@ -8,11 +8,12 @@
 //                   for `bun run hw` pass hosts/psp/target/mipsel-sony-psp/release)
 //   --port <n>     dev-server port (default 8130 / PORT env)
 
+import { fsPath } from "./fs-url.ts";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { startBridge } from "./devtools-bridge.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fsPath("..", import.meta.url);
 
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);

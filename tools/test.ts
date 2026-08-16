@@ -1,3 +1,4 @@
+import { fsPath } from "./fs-url.ts";
 // tools/test.ts — the test suite, as data. `bun run test` runs every stage
 // in order and fails fast; the package.json one-liner it replaces had grown
 // to nineteen &&-chained segments nobody could read or partially re-run.
@@ -177,7 +178,7 @@ if (stageFilter && selected.length === 0) {
   process.exit(1);
 }
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fsPath("..", import.meta.url);
 
 function fail(stage: string, cmd: readonly string[], captured?: string): never {
   if (captured) process.stderr.write(captured);

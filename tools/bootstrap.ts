@@ -1,6 +1,7 @@
 // PocketJS-owned, idempotent PSP setup. A fresh clone must not need DreamCart,
 // sibling source checkouts, or unpinned tools to produce an EBOOT.
 
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { createHash } from "node:crypto";
 import {
@@ -30,7 +31,7 @@ import {
   writePinnedCargoPspReceipt,
 } from "./psp-toolchain.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fsPath("..", import.meta.url);
 const home = process.env.HOME ?? "";
 const cacheRoot = pocketStackCacheRoot();
 const cachedSdk = cachedPspSdk();

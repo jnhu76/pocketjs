@@ -9,6 +9,7 @@
 // applied to the second generated artifact. Only the exports block is
 // touched; the rest of package.json is never rewritten.
 
+import { fsPath } from "./fs-url.ts";
 import { npmExports } from "../framework/compiler/subpaths.ts";
 
 /** The exact `"exports": { … }` block text, at package.json's indentation. */
@@ -32,7 +33,7 @@ export function withGeneratedExports(pkgText: string): string {
 }
 
 if (import.meta.main) {
-  const path = new URL("../package.json", import.meta.url).pathname;
+  const path = fsPath("../package.json", import.meta.url);
   const before = await Bun.file(path).text();
   const after = withGeneratedExports(before);
   if (after !== before) {

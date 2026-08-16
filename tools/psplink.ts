@@ -3,6 +3,7 @@
 // Interactive real-PSP switcher over PSPLINK. The Mac terminal owns the game
 // picker; the PSP only runs the selected PRX.
 
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -25,7 +26,7 @@ type Options = {
   basePort?: number;
 };
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fsPath("..", import.meta.url);
 const DEMOS_DIR = join(ROOT, "apps");
 const OUT_ROOT = join(ROOT, "dist/psplink");
 const MAIN_SUFFIX = "-main.tsx";

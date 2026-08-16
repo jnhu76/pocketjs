@@ -23,6 +23,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { fsPath } from "./fs-url.ts";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
@@ -48,7 +49,7 @@ import {
   withArtifactLock,
 } from "./psp-toolchain.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fsPath("..", import.meta.url);
 const APPS_DIR = join(ROOT, "apps");
 const LAUNCHER_DIR = join(APPS_DIR, "launcher");
 const COVERS_DIR = join(LAUNCHER_DIR, "covers");

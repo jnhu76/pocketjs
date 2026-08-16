@@ -9,12 +9,13 @@
 //
 // It serves hosts/psp/target/... as host0: through usbhostfs_pc, then ldstart's
 // the raw PRX through PSPLINK. Each reload is reset + ldstart.
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
 import { createInterface } from "node:readline";
 
-const pspUiDir = new URL("..", import.meta.url).pathname;
+const pspUiDir = fsPath("..", import.meta.url);
 const PRX = "host0:/pocketjs-psp.prx";
 const MAIN_SUFFIX = "-main.tsx";
 

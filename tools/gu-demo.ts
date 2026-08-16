@@ -10,11 +10,12 @@
 // Maps root (maps/*.bsp + support/*.wad): POCKET3D_TEST_MAPS or the local
 // default below. Output PNGs land in dist/gu-demo/.
 
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { resolvePspBuildToolchain } from "./psp-toolchain.ts";
 
-const repo = new URL("..", import.meta.url).pathname;
+const repo = fsPath("..", import.meta.url);
 const home = process.env.HOME ?? "";
 const pocket3d = `${repo}engine/pocket3d/`;
 const demoDir = `${pocket3d}crates/gu-demo/`;

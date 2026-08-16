@@ -13,12 +13,13 @@
 // here). On exit the shell prints its governor receipt:
 // "pocket-widget: N ticks, M frames rendered" — a settled note should show
 // M ≪ N (measured: 2 frames over 481 ticks).
+import { fsPath } from "./fs-url.ts";
 import { mkdirSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { $ } from "bun";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fsPath("..", import.meta.url);
 const args = process.argv.slice(2).filter((a) => a !== "--");
 const proof = args.includes("--proof");
 const pass = args.filter((f) => f !== "--proof");

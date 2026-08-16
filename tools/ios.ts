@@ -12,6 +12,7 @@
 //   pocket ios play  nsengine [--external-guest] [--device=<name|udid>] [flags]
 //
 // `play` is also reachable as `pocket play ios <app>`.
+import { fsPath } from "./fs-url.ts";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { demoManifestFor } from "./demo-identity.ts";
@@ -23,7 +24,7 @@ import {
   resolveIOSDevBuildPlan,
 } from "./ios-profile.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fsPath("..", import.meta.url);
 const DEFAULT_SHELL = resolve(ROOT, "hosts/apple/ns-shell");
 const XCFRAMEWORK_SCRIPT = resolve(ROOT, "engine/apple/build-xcframework.sh");
 const XCFRAMEWORK_DIST = resolve(ROOT, "engine/apple/dist/PocketApple.xcframework");

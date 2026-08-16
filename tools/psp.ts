@@ -16,6 +16,7 @@
 // --bench additionally enables native microsecond timing output to
 // ms0:/PocketJS-bench.jsonl and implies --capture.
 
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
@@ -33,7 +34,7 @@ import {
 import { verifyPlanHash, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import { resolvePspBuildToolchain } from "./psp-toolchain.ts";
 
-const pspUiDir = new URL("..", import.meta.url).pathname; // PocketJS/
+const pspUiDir = fsPath("..", import.meta.url); // PocketJS/
 const nativeDir = pspUiDir + "hosts/psp/";
 const pspTarget = nativeDir + "targets/mipsel-sony-psp.json";
 

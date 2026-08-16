@@ -14,6 +14,7 @@
 // Ctrl-C). On exit the shell prints its governor receipt:
 // "pocket-widget: N ticks, M frames rendered" — a settled app should show
 // M ≪ N.
+import { fsPath } from "./fs-url.ts";
 import { $ } from "bun";
 import { mkdirSync, readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
@@ -26,7 +27,7 @@ import {
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fsPath("..", import.meta.url);
 
 /** Transitional embedded target shared by the bundled PSP and iPod stages. */
 export const STAGE_TARGET_ID = "macos-embedded";
