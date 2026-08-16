@@ -507,48 +507,23 @@ impl FlatWidget for NoteGame {
     }
 }
 
-/// Put text on the system clipboard. pbcopy is the zero-dependency macOS
-/// road; other platforms just log (the widget shell is macOS-first).
+/// Put text on the system clipboard (pocket-clipboard owns the platform
+/// backends: pbcopy on macOS, the Win32 clipboard on Windows).
 fn clipboard_copy(text: &str) {
-    if text.is_empty() {
-        return;
+    match pocket_clipboard::copy(text) {
+        Ok(()) => log::info!("note-widget: copied {} bytes", text.len()),
+        Err(e) => log::warn!("note-widget: clipboard copy failed: {e}"),
     }
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let child = Command::new("pbcopy").stdin(Stdio::piped()).spawn();
-        match child {
-            Ok(mut child) => {
-                if let Some(stdin) = child.stdin.as_mut() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                let _ = child.wait();
-                log::info!("note-widget: copied {} bytes", text.len());
-            }
-            Err(e) => log::warn!("note-widget: pbcopy failed: {e}"),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    log::warn!("note-widget: clipboard copy unsupported on this platform");
 }
 
-/// Read the system clipboard (pbpaste — the macOS counterpart of copy).
+/// Read the system clipboard (pocket-clipboard owns the platform backends).
 fn clipboard_paste() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        match std::process::Command::new("pbpaste").output() {
-            Ok(out) => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
-            Err(e) => {
-                log::warn!("note-widget: pbpaste failed: {e}");
-                None
-            }
+    match pocket_clipboard::paste() {
+        Some(text) => Some(text),
+        None => {
+            log::warn!("note-widget: clipboard paste returned nothing");
+            None
         }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        log::warn!("note-widget: clipboard paste unsupported on this platform");
-        None
     }
 }
 

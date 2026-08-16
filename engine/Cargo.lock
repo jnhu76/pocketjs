@@ -1354,6 +1354,7 @@ dependencies = [
  "glam",
  "log",
  "memmap2",
+ "pocket-clipboard",
  "pocket-mod",
  "pocket-ui-wgpu",
  "pocket-widget",
@@ -1742,6 +1743,14 @@ dependencies = [
  "pocket-ui-surface",
  "pocketjs-core",
  "rquickjs",
+]
+
+[[package]]
+name = "pocket-clipboard"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "windows",
 ]
 
 [[package]]

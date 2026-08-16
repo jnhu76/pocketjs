@@ -11,6 +11,7 @@ pocket3d = { workspace = true }
 pocket-mod = { workspace = true }
 pocket-ui-wgpu = { workspace = true }
 pocket-widget = { workspace = true }
+pocket-clipboard = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
 glam = { workspace = true, features = ["std"] }
