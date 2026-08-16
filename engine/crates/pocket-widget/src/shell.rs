@@ -393,7 +393,20 @@ impl<D: Driver> WidgetApp<D> {
             .ok_or_else(|| anyhow::anyhow!("surface not supported by adapter"))?;
         surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         if self.config.transparent {
-            surface_config.alpha_mode = pick_alpha_mode(&surface, &gpu.adapter)?;
+            surface_config.alpha_mode = match pick_alpha_mode(&surface, &gpu.adapter) {
+                Some(mode) => mode,
+                None => {
+                    // Truthful fallback: a backend without alpha support
+                    // (non-composited sessions, some remote desktops) must
+                    // not kill the boot — the window degrades to the app's
+                    // own opaque background, with a diagnostic.
+                    log::warn!(
+                        "transparent window requested but surface supports no alpha mode — \
+                         falling back to an opaque surface"
+                    );
+                    wgpu::CompositeAlphaMode::Opaque
+                }
+            };
         }
         surface.configure(&gpu.device, &surface_config);
 

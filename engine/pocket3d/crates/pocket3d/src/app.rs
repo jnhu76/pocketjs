@@ -153,7 +153,16 @@ impl<G: Game> WinitApp<G> {
             .ok_or_else(|| anyhow::anyhow!("surface not supported by adapter"))?;
         surface_config.present_mode = wgpu::PresentMode::AutoVsync;
         if self.config.transparent {
-            surface_config.alpha_mode = pick_alpha_mode(&surface, &gpu.adapter)?;
+            surface_config.alpha_mode = match pick_alpha_mode(&surface, &gpu.adapter) {
+                Some(mode) => mode,
+                None => {
+                    log::warn!(
+                        "transparent window requested but surface supports no alpha mode — \
+                         falling back to an opaque surface"
+                    );
+                    wgpu::CompositeAlphaMode::Opaque
+                }
+            };
         }
         surface.configure(&gpu.device, &surface_config);
 
@@ -243,7 +252,7 @@ impl<G: Game> WinitApp<G> {
 pub fn pick_alpha_mode(
     surface: &wgpu::Surface<'_>,
     adapter: &wgpu::Adapter,
-) -> Result<wgpu::CompositeAlphaMode> {
+) -> Option<wgpu::CompositeAlphaMode> {
     let caps = surface.get_capabilities(adapter);
     for want in [
         wgpu::CompositeAlphaMode::PreMultiplied,
@@ -251,13 +260,13 @@ pub fn pick_alpha_mode(
         wgpu::CompositeAlphaMode::Inherit,
     ] {
         if caps.alpha_modes.contains(&want) {
-            return Ok(want);
+            return Some(want);
         }
     }
-    anyhow::bail!(
-        "transparent window requested but surface only supports {:?}",
-        caps.alpha_modes
-    )
+    // No alpha-capable mode (non-composited sessions, some remote
+    // desktops): callers fall back to an Opaque surface rather than
+    // failing the whole boot.
+    None
 }
 
 fn set_mouse_capture(state: &mut WindowState, captured: bool) {
