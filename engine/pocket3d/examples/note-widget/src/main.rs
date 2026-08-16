@@ -550,6 +550,8 @@ struct Args {
     file: Option<PathBuf>,
     size: (u32, u32),
     density: u32,
+    identity: String,
+    host_abi: u32,
     screenshot: Option<PathBuf>,
     frames: u64,
     script: Vec<(u64, ScriptEvent)>,
@@ -564,6 +566,8 @@ fn parse_args() -> Result<Args> {
         file: None,
         size: (420, 560),
         density: 2,
+        identity: "macos-widget".into(),
+        host_abi: 3,
         screenshot: None,
         frames: 40,
         script: Vec::new(),
@@ -589,6 +593,8 @@ fn parse_args() -> Result<Args> {
             "--width" => args.size.0 = val("--width")?.parse()?,
             "--height" => args.size.1 = val("--height")?.parse()?,
             "--density" => args.density = val("--density")?.parse()?,
+            "--identity" => args.identity = val("--identity")?,
+            "--host-abi" => args.host_abi = val("--host-abi")?.parse()?,
             "--screenshot" => args.screenshot = Some(PathBuf::from(val("--screenshot")?)),
             "--frames" => args.frames = val("--frames")?.parse()?,
             "--click" => {
@@ -717,8 +723,11 @@ fn boot(args: &Args) -> Result<(Guest, UiSurface)> {
         args.density,
     );
     // The platform-contract identity plan-built bundles assert
-    // (contracts/spec/platforms.ts POCKET_TARGETS["macos-widget"]).
-    surface.set_identity("macos-widget", 3);
+    // (contracts/spec/platforms.ts POCKET_TARGETS). The flat host is
+    // generic: the acceptance rig declares itself as its own target
+    // (e.g. --identity windows-app --host-abi 3) while note-widget keeps
+    // its default macos-widget identity.
+    surface.set_identity(&args.identity, args.host_abi);
     surface.feed_pak(&pak);
     let guest = Guest::new()?;
     surface.mount(&guest)?;
