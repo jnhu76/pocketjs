@@ -10,7 +10,6 @@
 //! baked Inter forms — only unseen codepoints go through the fallback.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 
@@ -31,6 +30,14 @@ fn slot_px(slot: u8) -> f32 {
 /// System fonts that cover CJK, tried in order; the first whose face maps
 /// '中' wins. The file is mmapped — resident memory stays at the pages the
 /// rasterizer actually touches, not the collection's tens of MB.
+///
+/// The list is per-substrate: Windows ships its CJK faces under
+/// %WINDIR%\Fonts (Microsoft YaHei first — the modern UI face;
+/// SimSun/SimHei/DengXian as the classic fallbacks), macOS under
+/// /System/Library/Fonts. Windows candidates are resolved through the
+/// WINDIR/SystemRoot environment variable so the discovery survives
+/// non-C: installs — never a hardcoded drive letter.
+#[cfg(target_os = "macos")]
 const FONT_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -39,6 +46,45 @@ const FONT_CANDIDATES: &[&str] = &[
     "/Library/Fonts/Arial Unicode.ttf",
 ];
 
+/// The Windows CJK faces, in priority order, resolved under %WINDIR%.
+#[cfg(target_os = "windows")]
+fn font_candidates() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    // WINDIR is the canonical variable; SystemRoot is its legacy name.
+    // Neither is set in exotic launchers, so fall back to the default
+    // install location rather than failing open.
+    let windir = std::env::var("WINDIR")
+        .or_else(|_| std::env::var("SystemRoot"))
+        .unwrap_or_else(|_| "C:\\Windows".to_string());
+    let fonts = PathBuf::from(windir).join("Fonts");
+    [
+        "msyh.ttc",   // Microsoft YaHei — the modern UI face
+        "msyhbd.ttc", // YaHei bold
+        "simsun.ttc", // SimSun
+        "simhei.ttf", // SimHei
+        "Deng.ttf",   // DengXian
+        "Dengb.ttf",  // DengXian bold
+        "msyhl.ttc",  // YaHei light
+    ]
+    .into_iter()
+    .map(|f| fonts.join(f))
+    .collect()
+}
+
+/// Non-Windows substrates: the macOS system faces (or nothing, on hosts
+/// without a CJK system font — the host then warns and tofu appears).
+#[cfg(target_os = "macos")]
+fn font_candidates() -> Vec<std::path::PathBuf> {
+    FONT_CANDIDATES.iter().map(Into::into).collect()
+}
+
+/// Hosts with no defined CJK face (e.g. Linux): no candidates, the host
+/// warns and tofu appears.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn font_candidates() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
 struct GlyphSource {
     map: memmap2::Mmap,
     index: u32,
@@ -46,11 +92,11 @@ struct GlyphSource {
 
 impl GlyphSource {
     fn find() -> Option<(GlyphSource, String)> {
-        for path in FONT_CANDIDATES {
-            if !Path::new(path).exists() {
+        for path in font_candidates() {
+            if !path.exists() {
                 continue;
             }
-            let Ok(file) = std::fs::File::open(path) else {
+            let Ok(file) = std::fs::File::open(&path) else {
                 continue;
             };
             let Ok(map) = (unsafe { memmap2::Mmap::map(&file) }) else {
@@ -61,7 +107,10 @@ impl GlyphSource {
                     break;
                 };
                 if font.glyph_id('中').0 != 0 {
-                    return Some((GlyphSource { map, index }, format!("{path}#{index}")));
+                    return Some((
+                        GlyphSource { map, index },
+                        format!("{}#{index}", path.display()),
+                    ));
                 }
             }
         }
