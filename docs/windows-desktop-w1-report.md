@@ -1,6 +1,19 @@
 # W1 — PocketJS Windows Desktop Enablement: Final Report
 
-Fork: `jnhu76/pocketjs` · Branch: `feat/windows-desktop` · Status: **FOUNDATION BOUNDARY CLOSED** (real-Windows evidence pending)
+Fork: `jnhu76/pocketjs` · Branch: `feat/windows-desktop`
+
+```text
+W1 IMPLEMENTATION:       CODE_COMPLETE_PENDING_VALIDATION
+POCKETJS_WINDOWS_DESKTOP: NOT_PROVEN
+MARKIT PRODUCT WORK:     UNBLOCKED_TO_START_IN_PARALLEL
+```
+
+Code-complete means every W1 mechanism is implemented and green on the
+Linux dry-run host. NOT_PROVEN stands until the PLATFORM_INTEGRATION
+acceptance run executes on a real Windows machine — that is the hard gate.
+These two verdicts coexist on purpose: Markit P0 can start in parallel
+(no foundation blocker surfaced), but starting product work is not evidence
+that the Windows gate closed.
 
 ## 16.1 Baseline
 
@@ -28,18 +41,26 @@ Fork: `jnhu76/pocketjs` · Branch: `feat/windows-desktop` · Status: **FOUNDATIO
 | `db80888` | `test(desktop): reproducible acceptance proof run for the generic text surface` |
 | `8058657` | `fix(tools): make filesystem URL conversion Windows-safe` |
 | `0b41e4b` | `fix(widget): fall back to an opaque surface when alpha is unsupported` |
+| `4d877b4` | `feat(host): explicit --form window posture for the flat desktop host` |
+| `b9e28f2` | `feat(acceptance): pair the rig on a provisional windows-app target` |
+| `2e4e5b8` | `refactor(acceptance): drop rich-text formatting from the gate surface` |
 
 ## 16.2 Capability matrix
 
 Evidence levels: `AUTOMATED_PASS` (bun test / headless dry-run), `MANUAL_PASS`, `NOT_TESTED`, `DEFERRED` (mechanism in place, real-Windows evidence pending).
 
+Evidence classes — a headless screenshot and a windowed OS run prove different things and are labeled differently:
+
+- `DESKTOP_WIRE_ACCEPTANCE` (automated, `bun tools/acceptance.ts`): scripted `--type/--paste/--key` inject **svc lines directly**. This proves the svc protocol, the guest editing surface and DrawList rendering. It does NOT exercise the OS input stack (winit → Input → `forward_edits`/`forward_ime` → primary chords), and `--paste` is injected text, not a system clipboard read.
+- `PLATFORM_INTEGRATION_ACCEPTANCE` (windowed, on the target OS): the real keyboard/IME/clipboard path through `--form window`. Nothing below claims this on Windows yet.
+
 | Capability | Status | Automated | Manual | Evidence |
 | --- | --- | --- | --- | --- |
-| Opaque desktop window | PROVEN (Linux) | `acceptance-proof.png` @2x, opaque fill verified | Windows: DEFERRED | Linux headless screenshot (vision-verified) |
+| Opaque desktop window | fill PROVEN (headless); posture CODE (`--form window`) | opaque fill in `acceptance-proof.png` @2x; posture config: `transparent:false, decorations:true, always_on_top:false` | Windows: DEFERRED | headless render proves the opaque FILL only — no OS window exists headless; posture awaits the windowed run |
 | Resize (live re-wrap) | code path in place | headless is fixed-size | Windows: DEFERRED | host `{"t":"resize"}` → `resizeViewport` → `layoutDoc` re-wrap |
 | Pointer (click/drag selection) | code path in place | — | Windows: DEFERRED | svc mouse stream → `caretFromX` drag selection |
-| Keyboard | PROVEN (Linux, svc-injected) | scripted `--type` landed at caret (doc 374→393) | Windows: DEFERRED | acceptance-proof.png |
-| Text input | PROVEN (Linux, svc-injected) | typed chars + paste inserted | Windows: DEFERRED | acceptance-proof.png (length + content) |
+| Keyboard | DESKTOP_WIRE (svc-injected) | scripted `--type` landed at caret | Windows: DEFERRED | acceptance-proof.png — wire-level, not the OS keyboard path |
+| Text input | DESKTOP_WIRE (svc-injected) | typed chars + paste inserted | Windows: DEFERRED | acceptance-proof.png (length + content) — wire-level |
 | Primary modifier | PROVEN (unit) | `primary_modifier_is_control_off_macos` + host chord remap | — | `cargo test -p pocket3d --lib input` (5 pass) |
 | Clipboard | PROVEN (typecheck Win32 + platform gate test) | `pocket-clipboard` tests on Linux (gate) + `--target x86_64-pc-windows-msvc` check | Windows round-trip: DEFERRED | `cargo check -p pocket-clipboard --target x86_64-pc-windows-msvc` |
 | CJK runtime glyphs | PROVEN (mechanism + discovery) | Linux dry-run shows tofu (expected — no Linux CJK face) | Windows: DEFERRED | cjk.rs `%WINDIR%` discovery, msyh.ttc first |
@@ -82,7 +103,8 @@ KEEP_DOWNSTREAM (not touched, not planned): Markit LineIndex, Markdown BlockInde
 - **IME** not hand-verified anywhere; code path + scripted svc path only. Microsoft Pinyin specifically cannot be simulated in CI.
 - **CJK glyph bake** not seen rendering on a real font; Linux host has no CJK candidate (tofu expected and observed).
 - **Clipboard Win32** typechecked only (`cargo check --target x86_64-pc-windows-msvc`); round-trip tests are `#[cfg(windows)]`-gated and will run on a Windows machine.
-- **Temporary target naming**: the acceptance app builds against the registered `macos-widget` contract; `windows-app` is a proposal, not a registered target. Host identity is a CLI parameter, not a contract.
+- **`windows-app` is provisional by design**: the formal `POCKET_TARGETS` registry is unchanged; the acceptance rig resolves against a test-local profile (`tools/acceptance-target.ts`) so the bundle and the windowed host pair on one identity (`windows-app`, hostAbi 3). Promoting it to a registered contract — and whether it keeps hostAbi 3 — is the W1-G upstream discussion.
+- **Unicode indexing seam (recorded follow-up)**: the Rust IME path converts winit's preedit cursor from byte offset to **Unicode scalar count**, while the guest editor positions its caret in **UTF-16 code units** (JS `string.length`/`slice`). BMP text — ASCII + BMP CJK, the W1 validation charset — is unaffected. Astral codepoints (emoji, CJK Extension B) occupy two JS code units and can land a caret/backspace/IME cursor inside a surrogate pair. W1 validation is scoped to **ASCII + BMP CJK**; unified indexing is a follow-up, not deferred silently.
 - **Font candidates** are a fixed reference list (msyh/simsun/simhei/DengXian under %WINDIR%); a registry-based discovery (registry queries / enumeration) is the follow-up seam.
 - Linux/macOS desktop implementation is out of scope for this round (mechanisms are platform-neutral by construction).
 
@@ -100,6 +122,13 @@ observed capabilities (what the W1 mechanisms actually deliver):
   text.glyphs.baked, text.glyphs.runtime
 ```
 
+The acceptance rig already runs against this profile as a test-local
+provisional registry (`tools/acceptance-target.ts`: POCKET_TARGETS +
+`windows-app`, hostAbi 3) so the bundle and the windowed host pair on one
+identity today. Promoting the profile — its id, its hostAbi, its capability
+set — into `contracts/spec/platforms.ts` is the upstream decision; until
+then the formal registry stays untouched.
+
 Open questions for upstream discussion:
 
 1. **`windows-app` vs a shared desktop abstraction**: `macos-widget` is borderless/always-on-top/widget-form; a decorated resizable window is a different posture. `form=window` should likely become a generic form, with `macos-widget` staying widget-form.
@@ -110,20 +139,24 @@ Open questions for upstream discussion:
 ## 16.6 Verdicts
 
 ```text
+W1 IMPLEMENTATION: CODE_COMPLETE_PENDING_VALIDATION
+  — every mechanism implemented; Linux dry-run green (DESKTOP_WIRE
+    acceptance). The windowed --form window host and the paired
+    windows-app bundle are ready for the real machine.
+
 POCKETJS_WINDOWS_DESKTOP: NOT_PROVEN
-  — all mechanisms implemented and Linux dry-run green, but real-Windows
-    evidence is the hard gate and no Windows machine was available.
-    Validation commands are prepared (below).
+  — PLATFORM_INTEGRATION evidence is the hard gate; no Windows machine
+    was available. Validation commands are prepared (below).
 
 UPSTREAM_READINESS: READY_FOR_INCREMENTAL_UPSTREAMING
   — the four UPSTREAM_NOW units (portability, primary modifier,
     clipboard, alpha fallback) are small, independent, tested, and have
     no Markit dependency.
 
-MARKIT: READY_FOR_PRODUCT_P0
+MARKIT: UNBLOCKED_TO_START_IN_PARALLEL
   — no foundation blocker surfaced that blocks Markit product work.
-    W1 closes the foundation boundary; Markit P0 can start. Real-Windows
-    validation of the substrate runs alongside, not ahead of, P0.
+    Markit P0 starting is NOT W1 closing; real-Windows validation of the
+    substrate runs alongside, not ahead of, P0.
 ```
 
 ## W1-E/B validation commands (for a Windows machine, in order)
@@ -131,14 +164,14 @@ MARKIT: READY_FOR_PRODUCT_P0
 ```text
 # 1. build the acceptance rig (Windows PowerShell, repo root)
 bun install
-bun run acceptance          # builds plan bundle + host + headless proof
-                            #   -> dist/acceptance-proof.png
+bun tools/acceptance.ts       # windows-app plan bundle + host + DESKTOP_WIRE
+                              #   headless proof -> dist/acceptance-proof.png
 
-# 2. windowed manual acceptance (the NOT_EXECUTED list)
-cargo run -p note-widget -- --app acceptance-main --identity windows-app ^
-  --host-abi 3 --width 1000 --height 700
+# 2. windowed PLATFORM_INTEGRATION acceptance (the NOT_EXECUTED list)
+cargo run -p note-widget -- --app acceptance-main --form window ^
+  --identity windows-app --host-abi 3 --width 1000 --height 700
   # manual: type, click-drag select, Ctrl+C/V/X, Ctrl+Left/Right word-dance,
-  # Ctrl+B/I/U, resize (re-wrap), Microsoft Pinyin preedit + commit,
+  # resize (re-wrap), Microsoft Pinyin preedit + commit,
   # CJK 汉字 visible (msyh.ttc), clean close
 
 # 3. clipboard round-trip (real Windows)
@@ -149,5 +182,5 @@ bun tools/test.ts
 cargo test -p pocket3d -p pocket-clipboard -p pocket-widget
 
 # 5. file evidence
-dist/acceptance-proof.png     # opaque window + typed/pasted text
+dist/acceptance-proof.png     # opaque surface + typed/pasted text (wire-level)
 ```
