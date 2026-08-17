@@ -20,3 +20,7 @@ env_logger = { workspace = true }
 serde_json = { workspace = true }
 ab_glyph = { workspace = true }
 memmap2 = { workspace = true }
+
+# CJK fallback discovery reads the installed-fonts registry (cjk.rs).
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"

@@ -31,6 +31,12 @@ fn slot_px(slot: u8) -> f32 {
 /// System fonts that cover CJK, tried in order; the first whose face maps
 /// '中' wins. The file is mmapped — resident memory stays at the pages the
 /// rasterizer actually touches, not the collection's tens of MB.
+///
+/// Discovery is per platform: the known macOS collections; the installed-
+/// fonts registry on Windows; the standard font directories elsewhere.
+/// Every candidate is coverage-verified before it wins, so a wrong
+/// preference costs one mmap and nothing else.
+#[cfg(target_os = "macos")]
 const FONT_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -44,32 +50,189 @@ struct GlyphSource {
     index: u32,
 }
 
+/// The coverage probe: a face that lacks this codepoint is not a CJK
+/// fallback candidate.
+const PROBE: char = '中';
+
+/// Mmap `path` and return face `index` if the collection covers the probe.
+fn open_covering(path: &Path, index: u32) -> Option<(GlyphSource, String)> {
+    let file = std::fs::File::open(path).ok()?;
+    let Ok(map) = (unsafe { memmap2::Mmap::map(&file) }) else {
+        return None;
+    };
+    let font = ab_glyph::FontRef::try_from_slice_and_index(&map, index).ok()?;
+    if font.glyph_id(PROBE).0 == 0 {
+        return None;
+    }
+    Some((GlyphSource { map, index }, format!("{path:?}#{index}")))
+}
+
+/// Every face of a font file (collections carry several; plain files carry
+/// one — index 1 then fails to parse and stops the loop).
+fn open_first_covering(path: &Path) -> Option<(GlyphSource, String)> {
+    (0..8u32).find_map(|index| open_covering(path, index))
+}
+
+/// True when the extension can rasterize from this file kind (.fon/.fnt
+/// bitmap fonts and Type1 pairs register alongside real files).
+fn is_font_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".ttf") || lower.ends_with(".ttc") || lower.ends_with(".otf")
+}
+
 impl GlyphSource {
     fn find() -> Option<(GlyphSource, String)> {
-        for path in FONT_CANDIDATES {
-            if !Path::new(path).exists() {
-                continue;
-            }
-            let Ok(file) = std::fs::File::open(path) else {
-                continue;
-            };
-            let Ok(map) = (unsafe { memmap2::Mmap::map(&file) }) else {
-                continue;
-            };
-            for index in 0..8u32 {
-                let Ok(font) = FontRef::try_from_slice_and_index(&map, index) else {
-                    break;
-                };
-                if font.glyph_id('中').0 != 0 {
-                    return Some((GlyphSource { map, index }, format!("{path}#{index}")));
-                }
-            }
-        }
-        None
+        platform_find()
     }
 
     fn font(&self) -> Option<FontRef<'_>> {
         FontRef::try_from_slice_and_index(&self.map, self.index).ok()
+    }
+}
+
+// macOS — the system collections, tried in coverage order.
+#[cfg(target_os = "macos")]
+fn platform_find() -> Option<(GlyphSource, String)> {
+    FONT_CANDIDATES
+        .iter()
+        .filter(|p| Path::new(p).exists())
+        .find_map(|p| open_first_covering(Path::new(p)))
+}
+
+// Windows — installed fonts come from the registry: value name is the face
+// ("Microsoft YaHei & Microsoft YaHei UI (TrueType)"), data is the file
+// ("msyh.ttc", relative to the fonts dir; per-user installs are absolute).
+#[cfg(target_os = "windows")]
+fn platform_find() -> Option<(GlyphSource, String)> {
+    // Preferred CJK families, best first — an ordering over discovered
+    // names, not a font-path list. Anything covering the probe still wins
+    // if none of these is installed.
+    const PREFER: &[&str] = &[
+        "microsoft yahei ui",
+        "microsoft yahei",
+        "noto sans cjk",
+        "noto serif cjk",
+        "source han sans",
+        "source han serif",
+        "dengxian",
+        "simsun",
+        "simhei",
+        "ms gothic",
+        "malgun gothic",
+    ];
+
+    let key = windows_registry::LOCAL_MACHINE
+        .open(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts")
+        .ok()?;
+    let mut names: Vec<(String, String)> = Vec::new();
+    let values = key.values().ok()?;
+    for (name, value) in values {
+        let Ok(file) = String::try_from(value) else { continue };
+        names.push((name.to_lowercase(), file));
+    }
+
+    for want in PREFER {
+        for (name, file) in &names {
+            if name.contains(want) {
+                if let Some(hit) = windows_open(file) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    // No preferred family installed (or none of them covered): fall back
+    // to honest discovery — first registered file that covers the probe.
+    names
+        .iter()
+        .filter_map(|(_, file)| windows_open(file))
+        .next()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_open(spec: &str) -> Option<(GlyphSource, String)> {
+    use std::path::PathBuf;
+    // Type1 entries carry "name.bmp, name.pfm" — the first file only.
+    let first = spec.split(',').next().unwrap_or("").trim();
+    if !is_font_file(first) {
+        return None;
+    }
+    let path = if Path::new(first).is_absolute() {
+        PathBuf::from(first)
+    } else {
+        std::env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join("Fonts"))
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\Fonts"))
+            .join(first)
+    };
+    open_first_covering(&path)
+}
+
+// Linux/BSD — scan the standard font trees (fontconfig's default dirs;
+// discovery stays a directory walk, not a daemon dependency).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_find() -> Option<(GlyphSource, String)> {
+    use std::path::PathBuf;
+    // Preferred CJK families by file-name stem, best first — an ordering
+    // over discovered files, verified by coverage like everywhere else.
+    const PREFER: &[&str] = &[
+        "notosanscjk",
+        "notoserifcjk",
+        "sourcehansans",
+        "sourcehanserif",
+        "wenquanyi",
+        "wqy",
+        "droidsansfallback",
+        "arphic",
+        "uming",
+        "ukai",
+    ];
+
+    let mut roots: Vec<PathBuf> = vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        roots.push(home.join(".local/share/fonts"));
+        roots.push(home.join(".fonts"));
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        collect_font_files(root, 0, &mut files);
+    }
+    // Stable preference ordering, then the first file that actually covers.
+    files.sort_by_key(|path| {
+        let stem = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let rank = PREFER
+            .iter()
+            .position(|p| stem.contains(p))
+            .unwrap_or(PREFER.len());
+        (rank, path.clone())
+    });
+    files.iter().find_map(|path| open_first_covering(path))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn collect_font_files(dir: &Path, depth: u8, out: &mut Vec<std::path::PathBuf>) {
+    if depth > 6 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
+        let path = entry.path();
+        if kind.is_dir() {
+            collect_font_files(&path, depth + 1, out);
+        } else {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if is_font_file(&name) {
+                out.push(path);
+            }
+        }
     }
 }
 
@@ -277,5 +440,51 @@ impl CjkAtlases {
             );
         }
         blobs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal well-formed v3 blob: header + N cmap entries + N coverage
+    /// cells (2x2 at density 1).
+    fn synth_blob(glyphs: &[(u32, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&FONT_MAGIC.to_le_bytes());
+        out.extend_from_slice(&3u16.to_le_bytes());
+        out.extend_from_slice(&(glyphs.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[2, 2, 2, 2, /*slot*/ 3, /*flags*/ 0, /*density*/ 1, 0]);
+        for &(cp, gid) in glyphs {
+            out.extend_from_slice(&cp.to_le_bytes());
+            out.extend_from_slice(&gid.to_le_bytes());
+            out.push(4); // advance
+            out.push(0); // xoff
+        }
+        out.extend(std::iter::repeat_n(0u8, glyphs.len() * 4));
+        out
+    }
+
+    #[test]
+    fn parse_rejects_non_atlas_blobs() {
+        assert!(SlotAtlas::parse(b"").is_none());
+        assert!(SlotAtlas::parse(b"not a font atlas blob!").is_none());
+    }
+
+    #[test]
+    fn blob_round_trip_is_codepoint_sorted() {
+        // Serialized out of codepoint order; blob() must re-sort.
+        let unsorted = synth_blob(&[(0x4e2d, 2), (0x41, 0), (0xe9, 1)]);
+        let atlas = SlotAtlas::parse(&unsorted).expect("synth blob parses");
+        assert_eq!(atlas.slot, 3);
+        assert_eq!(atlas.glyph_count(), 3);
+        assert!(atlas.known.contains(&0x4e2d));
+        let again = SlotAtlas::parse(&atlas.blob()).expect("re-serialized blob parses");
+        let cps: Vec<u32> = again.cmap.iter().map(|&(cp, ..)| cp).collect();
+        assert_eq!(cps, vec![0x41, 0xe9, 0x4e2d], "cmap serialized sorted");
+        assert_eq!(again.coverage.len(), atlas.coverage.len());
+        let third = SlotAtlas::parse(&again.blob()).expect("stable across re-serializations");
+        assert_eq!(third.cmap, again.cmap);
+        assert_eq!(third.coverage, again.coverage);
     }
 }
