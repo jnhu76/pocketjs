@@ -3,10 +3,11 @@
 // Deliberately the smallest thing that exercises every desktop-host
 // mechanism the acceptance rig exists to prove, over ONE plain-string
 // document: live typing with a caret, drag selection, word-dance
-// (Primary+Left/Right), copy/cut/paste through the system clipboard, basic
-// formatting via Primary+B/I/U, wheel scroll, live resize re-wrap, IME
-// composition and runtime CJK glyphs. There is no markdown, no undo/redo
-// and no save — the host only forwards input and mirrors the clipboard.
+// (Primary+Left/Right), copy/cut/paste through the system clipboard, wheel
+// scroll, live resize re-wrap, IME composition and runtime CJK glyphs.
+// There is no markdown, no rich text, no undo/redo and no save — the host
+// only forwards input and mirrors the clipboard. Rich-text formatting is
+// out of scope on purpose: W1 proves the substrate, not an editor product.
 //
 // The editing math is the same framework-free editor.ts the note app uses
 // (soft wrap + caret/selection over a string); this file is the thin
@@ -52,9 +53,8 @@ const INK = {
   thumb: "#414d5b",
 };
 
-/** Build-pinned font slot for body text (layout.ts FONT_BODY / bold). */
+/** Build-pinned font slot for body text (layout.ts FONT_BODY). */
 const FONT_BODY = 1;
-const FONT_BODY_BOLD = 8;
 
 /** The editor's measure fn (body font) — same contract as editor.ts. */
 function measure(text: string): number {
@@ -96,10 +96,10 @@ function wordRight(doc: string, pos: number): number {
 const SAMPLE_DOC =
   "Pocket Acceptance — a plain text surface.\n\n" +
   "Type here. Select with the mouse. Copy (Primary+C), cut (Primary+X),\n" +
-  "paste (Primary+V). Word-dance with Primary+Left/Right. Bold with\n" +
-  "Primary+B. IME composition and CJK 汉字 render through the runtime\n" +
-  "glyph atlas. Resize the window — the text re-wraps. Scroll with the\n" +
-  "wheel. Every row is the stock host mechanism doing its real job.";
+  "paste (Primary+V). Word-dance with Primary+Left/Right. IME composition\n" +
+  "and CJK 汉字 render through the runtime glyph atlas. Resize the window —\n" +
+  "the text re-wraps. Scroll with the wheel. Every row is the stock host\n" +
+  "mechanism doing its real job.";
 
 export default function Acceptance(): ReturnType<typeof View> {
   const svc = connectSvc();
@@ -110,7 +110,6 @@ export default function Acceptance(): ReturnType<typeof View> {
   const [anchor, setAnchor] = createSignal(0);
   const [preedit, setPreedit] = createSignal<{ text: string; cursor: number } | null>(null);
   const [scrollE, setScrollE] = createSignal(0);
-  const [fmt, setFmt] = createSignal({ bold: false, italic: false, underline: false });
 
   const viewH = () => vp().h - HEADER_H;
   const contentW = () => Math.max(40, vp().w - EDGE_PAD * 2);
@@ -148,9 +147,6 @@ export default function Acceptance(): ReturnType<typeof View> {
     const [lo, hi] = selBounds({ doc: doc(), caret: caret(), anchor: anchor() });
     return { lo, hi };
   };
-
-  const slot = () => (fmt().bold ? FONT_BODY_BOLD : FONT_BODY);
-  const mSlot = (text: string) => getOps().measureText(text, slot());
 
   // ---- edits --------------------------------------------------------------
   let goalX = 0;
@@ -329,12 +325,6 @@ export default function Acceptance(): ReturnType<typeof View> {
         resizeViewport(ev.w ?? 480, ev.h ?? 272);
         setScrollE(Math.max(0, Math.min(maxScrollE(), scrollE())));
         break;
-      case "load":
-        setDoc(ev.text ?? "");
-        setCaret(0);
-        setAnchor(0);
-        setPreedit(null);
-        break;
       case "ch":
         if (canEdit && ev.s) {
           setPreedit(null); // a commit replaces the preedit it finalizes
@@ -403,8 +393,8 @@ export default function Acceptance(): ReturnType<typeof View> {
     if (hi < lo) return null;
     if (hi === lo && !(sel.lo < line.start && sel.hi > line.end)) return null;
     return {
-      x0: mSlot(displayDoc().slice(line.start, lo)),
-      x1: mSlot(displayDoc().slice(line.start, hi)),
+      x0: measure(displayDoc().slice(line.start, lo)),
+      x1: measure(displayDoc().slice(line.start, hi)),
     };
   };
   const preeditRect = (line: { index: number; start: number; end: number }) => {
@@ -414,8 +404,8 @@ export default function Acceptance(): ReturnType<typeof View> {
     const hi = Math.min(caret() + p.text.length, line.end);
     if (hi <= lo) return null;
     return {
-      x0: mSlot(displayDoc().slice(line.start, lo)),
-      x1: mSlot(displayDoc().slice(line.start, hi)),
+      x0: measure(displayDoc().slice(line.start, lo)),
+      x1: measure(displayDoc().slice(line.start, hi)),
     };
   };
   const thumbH = (total: number) => Math.max(24, (viewH() * viewH()) / total);
@@ -433,16 +423,6 @@ export default function Acceptance(): ReturnType<typeof View> {
       />
     </Show>
   );
-  const fmtChip = (label: string, active: boolean, onPress: () => void) => (
-    <Focusable
-      class={active ? "px-2 rounded-md focus:bg-[#1d242e] bg-[#1d242e]" : "px-2 rounded-md focus:bg-[#1d242e]"}
-      onPress={onPress}
-    >
-      <Text class="text-xs font-bold" style={{ textColor: active ? INK.accent : INK.dim }}>
-        {label}
-      </Text>
-    </Focusable>
-  );
 
   return (
     <View class="flex-col w-full h-full bg-[#11151b]">
@@ -451,11 +431,6 @@ export default function Acceptance(): ReturnType<typeof View> {
           POCKET ACCEPTANCE
         </Text>
         <View class="flex-1" />
-        <Show when={canEdit}>
-          {fmtChip("B", fmt().bold, () => setFmt((f) => ({ ...f, bold: !f.bold })))}
-          {fmtChip("I", fmt().italic, () => setFmt((f) => ({ ...f, italic: !f.italic })))}
-          {fmtChip("U", fmt().underline, () => setFmt((f) => ({ ...f, underline: !f.underline })))}
-        </Show>
         <Text class="text-xs" style={{ textColor: INK.dim }}>
           {doc().length}
         </Text>
@@ -490,12 +465,6 @@ export default function Acceptance(): ReturnType<typeof View> {
                     }}
                   />
                 </Show>
-                <Show when={fmt().underline}>
-                  <View
-                    class="absolute rounded-sm"
-                    style={{ insetL: 0, insetR: 0, insetB: 2, height: 2, bgColor: INK.dim }}
-                  />
-                </Show>
                 <Show when={preeditRect(line) != null}>
                   <View
                     class="absolute rounded-sm"
@@ -509,7 +478,7 @@ export default function Acceptance(): ReturnType<typeof View> {
                   />
                 </Show>
                 <Text
-                  class={fmt().bold ? "absolute text-sm font-bold" : "absolute text-sm"}
+                  class="absolute text-sm"
                   style={{
                     insetL: 0,
                     insetT: 0,
