@@ -10,6 +10,13 @@
 //!   bun tools/build.ts note-main --density=2
 //!   cargo run -p note-widget
 //!   cargo run -p note-widget -- --file ~/notes/todo.md --width 380 --height 520
+//!   cargo run -p note-widget -- --app acceptance-main --form window
+//!
+//! `--form` picks the posture explicitly (never inferred from the app id):
+//! the default `widget` is the Pocket Note sticky note; `window` is the
+//! generic desktop acceptance host — an opaque, decorated, normal-level
+//! window with every note product behavior off (no note file, no save, no
+//! ••• menu state, no header drag, no resize grip). See docs/WIDGET.md.
 //!
 //! The host is the guest's companion process over the spec svc channel
 //! (ops 30..32): real keyboard/mouse/wheel/resize go in as JSON lines,
@@ -42,7 +49,22 @@ const BTN_CIRCLE: u32 = 0x2000;
 /// Ticks a scripted drag takes from press to its final position.
 const DRAG_TICKS: u64 = 8;
 
+/// Host posture — an explicit CLI choice, never derived from the app id.
+///
+/// `Widget` is the Pocket Note product: borderless, transparent,
+/// always-on-top, header-drag move, grip resize, a note file it loads and
+/// saves. `Window` is the generic desktop acceptance host: a normal opaque
+/// decorated OS window with all of that product behavior off — if the
+/// acceptance surface fails, the failure is PocketJS or the platform, never
+/// Pocket Note behavior (the W1-F rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostForm {
+    Widget,
+    Window,
+}
+
 struct NoteGame {
+    form: HostForm,
     surface: UiSurface,
     guest: Guest,
     renderer: Option<UiRenderer>,
@@ -95,6 +117,7 @@ enum ScriptEvent {
 
 impl NoteGame {
     fn new(
+        form: HostForm,
         surface: UiSurface,
         guest: Guest,
         atlases: cjk::CjkAtlases,
@@ -102,6 +125,7 @@ impl NoteGame {
         logical: (u32, u32),
     ) -> Self {
         NoteGame {
+            form,
             surface,
             guest,
             renderer: None,
@@ -143,20 +167,25 @@ impl NoteGame {
         }
     }
 
-    /// The svc hello: viewport first, then the document (order matters — the
-    /// app lays text out against the viewport it was just told about).
+    /// The svc hello: viewport first, then (widget form only) the note
+    /// document — order matters, the app lays text out against the viewport
+    /// it was just told about. The window form sends the viewport alone so
+    /// the guest boots its own initial document: a local ~/.pocket-note.md
+    /// must never leak into (or get overwritten by) an acceptance run.
     fn send_hello(&mut self) {
         self.svc(serde_json::json!({"t": "hello", "w": self.logical.0, "h": self.logical.1}));
-        let text = std::fs::read_to_string(&self.file).unwrap_or_default();
-        if !text.is_empty() {
-            self.ensure_text(&text);
-            self.svc(serde_json::json!({"t": "load", "text": text}));
+        if self.form == HostForm::Widget {
+            let text = std::fs::read_to_string(&self.file).unwrap_or_default();
+            if !text.is_empty() {
+                self.ensure_text(&text);
+                self.svc(serde_json::json!({"t": "load", "text": text}));
+            }
+            log::info!(
+                "note-widget: {} ({} bytes)",
+                self.file.display(),
+                text.len()
+            );
         }
-        log::info!(
-            "note-widget: {} ({} bytes)",
-            self.file.display(),
-            text.len()
-        );
     }
 
     fn save(&self, text: &str) {
@@ -305,8 +334,10 @@ impl FlatWidget for NoteGame {
         }
 
         // ⌘Q / ⌘W quit — the macOS widget has no titlebar close button; a
-        // decorated window quits through its own close control.
-        if input.super_down()
+        // decorated window (and every other window-form host) quits through
+        // its own close control.
+        if self.form == HostForm::Widget
+            && input.super_down()
             && (input.key_pressed(KeyCode::KeyQ) || input.key_pressed(KeyCode::KeyW))
         {
             self.exit = true;
@@ -420,7 +451,14 @@ impl FlatWidget for NoteGame {
         for line in self.surface.svc_drain() {
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(v) => match v["t"].as_str() {
-                    Some("save") => self.save(v["text"].as_str().unwrap_or_default()),
+                    // Saving is Pocket Note product behavior; the window form
+                    // is a generic host and persists nothing.
+                    Some("save") if self.form == HostForm::Widget => {
+                        self.save(v["text"].as_str().unwrap_or_default())
+                    }
+                    Some("save") => {
+                        log::debug!("note-widget: save intent ignored in window form")
+                    }
                     Some("quit") => self.exit = true,
                     Some("menu") => self.guest_menu_open = v["open"].as_bool().unwrap_or(false),
                     Some("copy") => clipboard_copy(v["text"].as_str().unwrap_or_default()),
@@ -489,9 +527,10 @@ impl FlatWidget for NoteGame {
 
     fn drag_at(&mut self, cursor: Vec2) -> bool {
         // The header is the move handle, minus the buttons on its right.
+        // Window form: a decorated window moves through its own titlebar.
         // While the guest's menu is up, nothing is a drag region — clicks
         // must reach the backdrop so it can close.
-        if self.guest_menu_open {
+        if self.form == HostForm::Window || self.guest_menu_open {
             return false;
         }
         let (x, y) = (cursor.x / self.scale as f32, cursor.y / self.scale as f32);
@@ -499,7 +538,8 @@ impl FlatWidget for NoteGame {
     }
 
     fn resize_at(&mut self, cursor: Vec2) -> bool {
-        if self.guest_menu_open {
+        // Window form: the OS resize border owns resizing — no custom grip.
+        if self.form == HostForm::Window || self.guest_menu_open {
             return false;
         }
         let (x, y) = (cursor.x / self.scale as f32, cursor.y / self.scale as f32);
@@ -554,6 +594,7 @@ fn fnv1a64(words: &[u32]) -> u64 {
 
 struct Args {
     app: String,
+    form: HostForm,
     js: Option<PathBuf>,
     pak: Option<PathBuf>,
     file: Option<PathBuf>,
@@ -570,6 +611,7 @@ struct Args {
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         app: "note-main".into(),
+        form: HostForm::Widget,
         js: None,
         pak: None,
         file: None,
@@ -596,6 +638,13 @@ fn parse_args() -> Result<Args> {
         }
         match a.as_str() {
             "--app" => args.app = val("--app")?,
+            "--form" => {
+                args.form = match val("--form")?.as_str() {
+                    "widget" => HostForm::Widget,
+                    "window" => HostForm::Window,
+                    other => return Err(anyhow!("unknown form {other} (widget or window)")),
+                };
+            }
             "--js" => args.js = Some(PathBuf::from(val("--js")?)),
             "--pak" => args.pak = Some(PathBuf::from(val("--pak")?)),
             "--file" => args.file = Some(PathBuf::from(val("--file")?)),
@@ -731,11 +780,12 @@ fn boot(args: &Args) -> Result<(Guest, UiSurface)> {
         (args.size.0 as f32, args.size.1 as f32),
         args.density,
     );
-    // The platform-contract identity plan-built bundles assert
-    // (contracts/spec/platforms.ts POCKET_TARGETS). The flat host is
-    // generic: the acceptance rig declares itself as its own target
-    // (e.g. --identity windows-app --host-abi 3) while note-widget keeps
-    // its default macos-widget identity.
+    // The platform-contract identity plan-built bundles assert: the host's
+    // (--identity, --host-abi) must equal the plan's target id and hostAbi
+    // (framework/src/host.ts rejects any mismatch). The flat host is
+    // generic: note-widget keeps its default macos-widget identity, while
+    // the acceptance rig pairs --identity windows-app/--host-abi 3 with the
+    // bundle tools/acceptance.ts builds against the same provisional target.
     surface.set_identity(&args.identity, args.host_abi);
     surface.feed_pak(&pak);
     let guest = Guest::new()?;
@@ -756,15 +806,24 @@ fn main() -> Result<()> {
     let atlases = cjk::CjkAtlases::from_pak(&std::fs::read(
         resolve_asset(args.pak.clone(), &args.app, "pak")?,
     )?);
-    let mut game = NoteGame::new(surface, guest, atlases, note_file(args.file.clone()), args.size);
+    let mut game = NoteGame::new(
+        args.form,
+        surface,
+        guest,
+        atlases,
+        note_file(args.file.clone()),
+        args.size,
+    );
     game.script = std::mem::take(&mut args.script);
     game.quit_after = args.auto_quit.map(|s| (s * 60.0) as u64);
 
     if let Some(out) = args.screenshot.clone() {
         headless(game, args, &out)
     } else {
-        pocket_widget::run_flat(
-            WidgetConfig {
+        let config = match args.form {
+            // The Pocket Note widget: borderless, transparent, always-on-top
+            // — the posture WidgetConfig::default() describes.
+            HostForm::Widget => WidgetConfig {
                 title: "Pocket Note".into(),
                 size: args.size,
                 resizable: true,
@@ -772,8 +831,23 @@ fn main() -> Result<()> {
                 ime: true,
                 ..Default::default()
             },
-            game,
-        )
+            // The generic desktop window: opaque, decorated, normal window
+            // level — winit's own defaults. Anything a plain OS window gives
+            // for free (titlebar move/close, native resize borders) is left
+            // to the OS; the host adds no product chrome.
+            HostForm::Window => WidgetConfig {
+                title: format!("Pocket — {}", args.app),
+                size: args.size,
+                transparent: false,
+                decorations: true,
+                always_on_top: false,
+                resizable: true,
+                min_size: (240, 180),
+                ime: true,
+                ..Default::default()
+            },
+        };
+        pocket_widget::run_flat(config, game)
     }
 }
 
