@@ -268,6 +268,11 @@ struct Args {
     /// runtime reaches `tick`, the window thread resizes the actual OS
     /// window so composition is proven through the real live-resize path.
     resize_at: Option<((u32, u32), u64)>,
+    /// A6 scripted scale transitions: `--scale-at SCALE@TICK` (repeatable,
+    /// applied in argument order). Drives the same apply_scale handler the
+    /// real `ScaleFactorChanged` event uses: winit scale override, logical
+    /// viewport re-asserted, raster density follows the scale.
+    scale_at: Vec<(f64, u64)>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -294,6 +299,7 @@ fn parse_args() -> Result<Args> {
         a3_harness: false,
         a3_files: Vec::new(),
         resize_at: None,
+        scale_at: Vec::new(),
     };
     let mut system_plan_path = None;
     let mut it = std::env::args().skip(1);
@@ -420,6 +426,18 @@ fn parse_args() -> Result<Args> {
                 let (wh, t) = v.rsplit_once('@').ok_or_else(|| anyhow!("--resize-at W,H@TICK"))?;
                 let (w, h) = wh.split_once(',').ok_or_else(|| anyhow!("--resize-at W,H@TICK"))?;
                 args.resize_at = Some(((w.parse()?, h.parse()?), t.parse()?));
+            }
+            "--scale-at" => {
+                // --scale-at SCALE@TICK (repeatable) — A6 scale transition
+                // driven through the real ScaleFactorChanged handler.
+                let v = val("--scale-at")?;
+                let (s, t) = v.rsplit_once('@').ok_or_else(|| anyhow!("--scale-at SCALE@TICK"))?;
+                let scale: f64 = s.parse()?;
+                if !(0.5..=6.0).contains(&scale) {
+                    return Err(anyhow!("--scale-at SCALE must be within 0.5..=6.0"));
+                }
+                args.scale_at.push((scale, t.parse()?));
+                args.scale_at.sort_by_key(|(_, t)| *t);
             }
             "--press" => {
                 // --press NAME@TICK (console button script: up/down/left/

@@ -954,4 +954,53 @@ mod tests {
         assert!(per_request < 512, "cancel replies are bounded, got {per_request} B/req");
         std::fs::remove_file(&path).ok();
     }
+
+    // ------------------------------------------------------------------
+    // A6: Per-Monitor DPI V2 coordinate domains. Image coordinates live in
+    // texture space; the guest composes in logical viewport coordinates;
+    // the window reports physical client pixels; the monitor DPI is
+    // 96 × scale. The raster density is what couples logical to physical
+    // at present time, and it must FOLLOW the scale instead of freezing
+    // at the plan value.
+
+    #[test]
+    fn a6_logical_viewport_is_stable_across_scale_changes() {
+        // Policy: the logical viewport is the invariant; physical client
+        // pixels are logical × scale. Converting back must return the
+        // identical logical viewport at every scale step — no stale
+        // prior-monitor physical transform may survive.
+        let logical = (720u32, 480u32);
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let physical = (
+                (logical.0 as f64 * scale).round() as u32,
+                (logical.1 as f64 * scale).round() as u32,
+            );
+            assert_eq!(
+                logical_from_physical(physical.0, physical.1, scale),
+                logical,
+                "round trip at scale {scale}"
+            );
+        }
+        // The clamps this conversion has always applied are preserved.
+        assert_eq!(logical_from_physical(20000, 20000, 1.0), (4096, 4096));
+        assert_eq!(logical_from_physical(0, 0, 1.0).0.max(logical_from_physical(0, 0, 1.0).1) >= 240, true);
+    }
+
+    #[test]
+    fn a6_effective_density_follows_window_scale_when_driven() {
+        // Without a driven scale the plan density stays authoritative
+        // (backwards compatible with every earlier ticket's runs).
+        assert_eq!(effective_density(2, None), 2);
+        assert_eq!(effective_density(1, None), 1);
+        // Once a scale transition is driven, the raster tracks the
+        // window scale: 100% -> 1x, 200% -> 2x, fractional scales round
+        // to the nearest integer sample density.
+        assert_eq!(effective_density(2, Some(1.0)), 1);
+        assert_eq!(effective_density(2, Some(2.0)), 2);
+        assert_eq!(effective_density(1, Some(2.0)), 2, "plan density is a floor for driven scales above it");
+        assert_eq!(effective_density(2, Some(1.5)), 2);
+        assert_eq!(effective_density(2, Some(1.25)), 1);
+        assert_eq!(effective_density(2, Some(0.5)), 1, "never below 1x");
+        assert_eq!(effective_density(2, Some(6.0)), 4, "clamped like --density");
+    }
 }

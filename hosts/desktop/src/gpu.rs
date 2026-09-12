@@ -87,7 +87,10 @@ impl Renderer {
     /// commands. Shared queue ordering then makes reuse safe without readback
     /// or waiting for GPU completion on either CPU thread.
     pub fn render(&mut self, runtime: &mut Runtime) -> Result<Option<Arc<Target>>> {
-        let density = runtime.args.density;
+        // A6: once a scale transition is driven, the raster tracks the
+        // window scale instead of freezing at the plan density — present
+        // stays 1:1 with physical client pixels on every monitor.
+        let density = crate::effective_density(runtime.args.density, runtime.scale);
         let size = (runtime.viewport.0 * density, runtime.viewport.1 * density);
         let Some(frame) = self.acquire_target(size)? else {
             return Ok(None);

@@ -23,13 +23,18 @@ env_logger = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 # Bounded WIC decoder integration for the A3 proof harness (imaging +
-# COM init/variant plumbing only; no broader Win32 surface).
+# COM init/variant plumbing only; no broader Win32 surface). A6 adds the
+# HiDpi feature: PMv2 awareness declaration + verification only.
 windows = { version = "0.62", features = [
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
+    "Win32_UI_HiDpi",
 ] }
+# A6: names the raw-window-handle version already in the wgpu/winit tree;
+# used only to read the window HWND for the PMv2 awareness assertion.
+raw-window-handle = "0.6"
 
 [profile.release]
 debug = false

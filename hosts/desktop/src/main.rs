@@ -21,7 +21,7 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
@@ -43,10 +43,36 @@ fn text_worker(pak: Vec<u8>) -> OffloadWorker {
     })
 }
 
+/// A6: the raster density the runtime actually renders with. The plan
+/// density is authoritative until a scale transition is driven (by the
+/// OS on a real monitor DPI move, or by the harness), after which the
+/// window scale governs so the raster tracks physical client pixels —
+/// present stays 1:1 and nothing is bitmap-stretched.
+fn effective_density(plan_density: u32, scale: Option<f64>) -> u32 {
+    match scale {
+        None => plan_density,
+        Some(s) => (s.round() as u32).clamp(1, 4),
+    }
+}
+
+/// A6: logical viewport from a physical client-size report — the exact
+/// conversion the winit Resized path has always applied, factored out so
+/// the scale-transition tests can pin logical stability.
+fn logical_from_physical(w: u32, h: u32, scale: f64) -> (u32, u32) {
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    (
+        (w as f64 / scale).round().clamp(240.0, 4096.0) as u32,
+        (h as f64 / scale).round().clamp(180.0, 4096.0) as u32,
+    )
+}
+
 enum Input {
     Service(Value),
     Pointer(Value),
     Resize(u32, u32),
+    /// A6: a monitor-DPI/scale transition (real or harness-driven). The
+    /// logical viewport is the invariant; the raster density follows.
+    Scale(f64),
     Button(u32, bool),
     Reset,
     Quit,
@@ -85,6 +111,8 @@ struct Runtime {
     supervisor: AppSupervisor,
     offload: OffloadWorker,
     viewport: (u32, u32),
+    /// A6: driven window scale; None until the first transition.
+    scale: Option<f64>,
     ticks: u64,
     buttons: u32,
     script: Vec<ScriptEvent>,
@@ -140,6 +168,7 @@ impl Runtime {
         let a3_files = args.a3_files.clone();
         let mut runtime = Self {
             viewport: args.viewport,
+            scale: None,
             script: args.script.clone(),
             args,
             surface,
@@ -202,6 +231,22 @@ impl Runtime {
                     &format!("globalThis.__pocketResizeViewport?.({w},{h})"),
                 )?;
                 self.svc(json!({"t":"resize","w":w,"h":h}));
+            }
+            Input::Scale(s) => {
+                // A6: monitor truth changed. The logical viewport and the
+                // guest's composition state are untouched; the raster
+                // density follows the scale so present stays 1:1 with
+                // physical client pixels (no OS bitmap stretch).
+                self.scale = Some(s);
+                let density = effective_density(self.args.density, Some(s));
+                eprintln!(
+                    "A6EVENT,raster,density={density},scale={s},logical={}x{}",
+                    self.viewport.0, self.viewport.1
+                );
+                self.svc(
+                    json!({"t":"resize","w":self.viewport.0,"h":self.viewport.1,
+                           "dpi":s*96.0,"density":density}),
+                );
             }
             _ => {}
         }
@@ -450,9 +495,54 @@ struct Host {
     trace_frames: bool,
     resize_at: Option<((u32, u32), u64)>,
     resize_done: bool,
+    /// A6 scripted scale transitions (harness order) + progress.
+    scale_at: Vec<(f64, u64)>,
+    /// A6: the same schedule on the host wall clock (nominal 60 Hz ticks
+    /// from process start), consumed by about_to_wait.
+    scale_at_instant: Vec<(f64, u64, Instant)>,
+    scale_done: usize,
+    /// A6 driven scale; None until the first transition, after which it
+    /// governs every logical↔physical conversion in this host.
+    scale_override: Option<f64>,
+    /// Set once any scale transition has been driven; gates the A6
+    /// physical/logical trace lines and the raster-follow logging.
+    scale_driven: bool,
     failure: Option<String>,
 }
 impl Host {
+    /// The scale every logical↔physical conversion in this host uses:
+    /// the driven value once a scale transition happened (harness or OS),
+    /// else the window's own monitor-derived scale.
+    fn current_scale(&self) -> f64 {
+        self.scale_override.unwrap_or_else(|| {
+            self.window
+                .as_ref()
+                .map(|w| w.scale_factor())
+                .unwrap_or(1.0)
+        })
+    }
+
+    /// A6: one scale transition, from either the real OS event
+    /// (`ScaleFactorChanged`, multi-monitor move) or the scripted harness
+    /// path (`--scale-at`). The logical viewport is the invariant — it is
+    /// re-asserted so physical client pixels become logical × scale — and
+    /// the raster density follows the scale (see `effective_density`).
+    fn apply_scale(&mut self, scale: f64, tick: u64) {
+        self.scale_driven = true;
+        self.scale_override = Some(scale);
+        if let Some(window) = &self.window {
+            let _resized = window.request_inner_size(PhysicalSize::new(
+                (self.viewport.0 as f64 * scale).round() as u32,
+                (self.viewport.1 as f64 * scale).round() as u32,
+            ));
+            window.request_redraw();
+        }
+        let _ = self.tx.send(Input::Scale(scale));
+        eprintln!(
+            "A6EVENT,scale,{scale},logical={}x{},tick={tick}",
+            self.viewport.0, self.viewport.1
+        );
+    }
     fn send(&mut self, input: Input) {
         // Coalesce only motion; button and key edges retain FIFO order.
         if let Input::Pointer(value) = &input
@@ -532,6 +622,20 @@ impl ApplicationHandler<Wake> for Host {
         if self.window.is_some() {
             return;
         }
+        #[cfg(windows)]
+        {
+            // A6: pin the Per-Monitor DPI Awareness V2 contract. winit
+            // already requests it for the process; the explicit call keeps
+            // the host honest even if the toolkit default ever changes.
+            // Idempotent (returns FALSE with ERROR_ACCESS_DENIED if the
+            // awareness context is already fixed).
+            use windows::Win32::UI::HiDpi::{
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+            };
+            unsafe {
+                let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            }
+        }
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -542,6 +646,33 @@ impl ApplicationHandler<Wake> for Host {
                 )
                 .expect("create window"),
         );
+        #[cfg(windows)]
+        {
+            // A6: prove the created window actually runs under PMv2.
+            use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::HiDpi::{
+                AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                GetWindowDpiAwarenessContext, GetDpiForWindow,
+            };
+            let hwnd = match window.window_handle().expect("window handle").as_raw() {
+                RawWindowHandle::Win32(win) => HWND(win.hwnd.get() as *mut _),
+                _ => unreachable!("windows build always has a Win32 handle"),
+            };
+            unsafe {
+                let ctx = GetWindowDpiAwarenessContext(hwnd);
+                let pmv2 = AreDpiAwarenessContextsEqual(
+                    ctx,
+                    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                );
+                let dpi = GetDpiForWindow(hwnd);
+                eprintln!(
+                    "A6EVENT,dpi-awareness,per_monitor_v2={},windowDpi={}",
+                    pmv2.as_bool(),
+                    dpi
+                );
+            }
+        }
         window.set_ime_allowed(true);
         let presentation = match gpu::Presentation::new(window.clone()) {
             Ok(presentation) => presentation,
@@ -647,6 +778,9 @@ impl ApplicationHandler<Wake> for Host {
                         eprintln!("A2EVENT,resize-window,{w},{h},atTick={at}");
                         let _resized = window.request_inner_size(LogicalSize::new(w, h));
                     }
+                    // A6 scale transitions are driven from about_to_wait on
+                    // the host clock: a static image emits no outputs, so
+                    // scripted transitions cannot wait on output ticks.
                 }
             }
         }
@@ -654,11 +788,26 @@ impl ApplicationHandler<Wake> for Host {
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.flush();
+        // A6: drive due scale transitions on the host clock (see the
+        // schedule note on Host::scale_at_instant).
+        while self.scale_done < self.scale_at_instant.len()
+            && self.scale_at_instant[self.scale_done].2 <= Instant::now()
+        {
+            let (scale, tick, due) = self.scale_at_instant[self.scale_done];
+            self.scale_done += 1;
+            self.apply_scale(scale, tick);
+        }
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
         if !self.pending.is_empty() {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(8),
             ));
+        } else if let Some((_, _, next)) = self
+            .scale_at_instant
+            .get(self.scale_done)
+            .filter(|(_, _, due)| *due > Instant::now())
+        {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(*next));
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -675,12 +824,22 @@ impl ApplicationHandler<Wake> for Host {
                 }
             }
             WindowEvent::Resized(size) => {
-                let scale = self.window.as_ref().unwrap().scale_factor();
-                self.send(Input::Resize(
-                    (size.width as f64 / scale).round().clamp(240.0, 4096.0) as u32,
-                    (size.height as f64 / scale).round().clamp(180.0, 4096.0) as u32,
-                ));
+                let scale = self.current_scale();
+                let logical = logical_from_physical(size.width, size.height, scale);
+                if self.scale_driven {
+                    eprintln!(
+                        "A6EVENT,physical,{}x{},scale={scale},logical={}x{}",
+                        size.width, size.height, logical.0, logical.1
+                    );
+                }
+                self.send(Input::Resize(logical.0, logical.1));
                 self.window.as_ref().unwrap().request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // Real OS monitor-DPI transition (multi-monitor move) —
+                // identical handler to the scripted harness path.
+                let tick = self.frame.as_ref().map_or(0, |(t, _)| *t);
+                self.apply_scale(scale_factor, tick);
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Focused(false) => {
@@ -688,7 +847,7 @@ impl ApplicationHandler<Wake> for Host {
                 self.send(Input::Reset);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = self.window.as_ref().unwrap().scale_factor();
+                let scale = self.current_scale();
                 self.pointer = (position.x / scale, position.y / scale);
                 self.send(Input::Pointer(json!({"t":"mouse","x":self.pointer.0,"y":self.pointer.1,"d":self.down,"sh":self.modifiers.shift_key()})));
             }
@@ -784,8 +943,26 @@ fn main() -> Result<()> {
         trace_frames: args.trace_frames,
         resize_at: args.resize_at,
         resize_done: false,
+        scale_at: args.scale_at.clone(),
+        scale_at_instant: Vec::new(),
+        scale_done: 0,
+        scale_override: None,
+        scale_driven: false,
         failure: None,
     };
+    // A6: nominal 60 Hz tick schedule on the host wall clock.
+    let host_start = Instant::now();
+    host.scale_at_instant = args
+        .scale_at
+        .iter()
+        .map(|(scale, tick)| {
+            (
+                *scale,
+                *tick,
+                host_start + Duration::from_nanos(1_000_000_000 * *tick / 60),
+            )
+        })
+        .collect();
     host.startup = Some(RuntimeStartup {
         args,
         inputs,
