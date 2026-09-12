@@ -1485,6 +1485,106 @@ fn image_tex_quad_clips_with_uv_reinterpolation() {
 }
 
 #[test]
+fn native_image_resource_registers_composes_and_retires_without_gc() {
+    let mut ui = Ui::new();
+    // The JS-facing small-texture contract is untouched: a fresh core still
+    // hands handle 0 to the first uploadTexture, and non-pow2/>512 still fail.
+    let legacy = alloc::vec![0x80u8; 16 * 16 * 4];
+    assert_eq!(ui.upload_texture(&legacy, 16, 16, spec::psm::PSM_8888), 0);
+    assert_eq!(ui.upload_texture(&legacy, 3840, 2160, spec::psm::PSM_8888), -1);
+
+    // Native registration: non-pow2, 4K, and the registry's live-byte total
+    // reflects the full pixel plane (3840*2160*4 = 33_177_600).
+    let mut pixels = alloc::vec![0u8; 3840 * 2160 * 4];
+    for (i, byte) in pixels.iter_mut().enumerate() {
+        *byte = (i % 251) as u8;
+    }
+    let a = ui.register_native_texture(&pixels, 3840, 2160, spec::psm::PSM_8888, false);
+    assert_eq!(a, 1);
+    assert_eq!(ui.texture_live_bytes(), 16 * 16 * 4 + 3840 * 2160 * 4);
+    let view = ui.texture(a).unwrap();
+    assert_eq!(
+        (view.w, view.h, view.psm),
+        (3840, 2160, spec::psm::PSM_8888)
+    );
+    assert_eq!(view.pixels.as_ptr() as usize % 16, 0);
+
+    // The guest binds it to an image node much smaller than the texture:
+    // TEX_QUAD carries the LAYOUT box, not the texture size (scaling is the
+    // existing geometry path), and the DrawList references only the handle.
+    let img = ui.create_node(spec::NodeType::Image as u8);
+    ui.set_prop(img, spec::prop::WIDTH, 320.0);
+    ui.set_prop(img, spec::prop::HEIGHT, 180.0);
+    ui.set_image(img, a);
+    ui.insert_before(spec::ROOT_ID, img, 0);
+    ui.tick();
+    let words = ui.draw().words.clone();
+    let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
+    assert_eq!(words[i + 1], a as u32);
+    assert_eq!(decode_wh(words[i + 3]), (320, 180));
+
+    // Replacement A -> B through the same node.
+    let pixels_b = alloc::vec![0x11u8; 3840 * 2160 * 4];
+    let b = ui.register_native_texture(&pixels_b, 3840, 2160, spec::psm::PSM_8888, true);
+    assert_eq!(b, 2);
+    ui.set_image(img, b);
+    ui.tick();
+    let words = ui.draw().words.clone();
+    let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
+    assert_eq!(words[i + 1], b as u32);
+
+    // Explicit retirement of A: pixel bytes drop synchronously (no GC
+    // involvement), the handle goes stale, and a stale setImage is ignored —
+    // the binding resolves to deterministic absence, not use-after-free.
+    let live_before = ui.texture_live_bytes();
+    ui.free_texture(a);
+    assert_eq!(ui.texture_live_bytes(), live_before - 3840 * 2160 * 4);
+    assert!(ui.texture(a).is_none());
+    assert_eq!(ui.texture_revision(a), None);
+    ui.set_image(img, a); // stale: silently ignored
+    ui.tick();
+    let words = ui.draw().words.clone();
+    let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
+    assert_eq!(words[i + 1], b as u32, "B keeps composing after A's free");
+
+    // The freed slot is reused with a bumped generation: the recycled slot
+    // never aliases the dead handle.
+    let pixels_c = alloc::vec![0x22u8; 8 * 8 * 4];
+    let c = ui.register_native_texture(&pixels_c, 8, 8, spec::psm::PSM_8888, false);
+    assert_ne!(c, a);
+    assert_eq!(
+        (c as u32) & spec::TEX_SLOT_MASK,
+        (a as u32) & spec::TEX_SLOT_MASK
+    ); // same slot...
+    assert_ne!(c, 0); // ...different generation-tagged handle
+    assert!(ui.texture(c).is_some());
+}
+
+#[test]
+fn native_image_resource_rejects_malformed_input() {
+    let mut ui = Ui::new();
+    let pixels = alloc::vec![0u8; 64 * 64 * 4];
+    assert_eq!(ui.register_native_texture(&pixels, 0, 64, spec::psm::PSM_8888, false), -1);
+    assert_eq!(ui.register_native_texture(&pixels, 64, 0, spec::psm::PSM_8888, false), -1);
+    assert_eq!(
+        ui.register_native_texture(&pixels, 8193, 8, spec::psm::PSM_8888, false),
+        -1
+    );
+    assert_eq!(
+        ui.register_native_texture(&pixels, 8, 8193, spec::psm::PSM_8888, false),
+        -1
+    );
+    // CLUT formats stay on the pak/uploadTexture paths: the native seam
+    // deliberately accepts only the palette-less PSMs.
+    assert_eq!(ui.register_native_texture(&pixels, 16, 16, spec::psm::PSM_T8, false), -1);
+    assert_eq!(ui.register_native_texture(&pixels[..100], 64, 64, spec::psm::PSM_8888, false), -1);
+    assert_eq!(ui.texture_live_bytes(), 0, "rejections must not allocate");
+    // The admission bound itself is accepted: exactly 8192 passes validation.
+    let max_pixels = alloc::vec![0u8; 8 * 8192 * 4];
+    assert!(ui.register_native_texture(&max_pixels, 8, 8192, spec::psm::PSM_8888, false) >= 0);
+}
+
+#[test]
 fn root_is_a_full_screen_flex_column() {
     let mut ui = Ui::new();
     ui.tick();

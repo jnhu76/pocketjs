@@ -68,6 +68,13 @@ const DEFAULT_TICK_HZ: u32 = 60;
 /// durations, and no display drives faster anyway.
 pub const MAX_TICK_HZ: u32 = 240;
 
+/// Per-axis upper bound for natively registered image resources
+/// (`register_native_texture`). 8192 is the wgpu-default
+/// `max_texture_dimension_2d` class; this is an overflow-safe admission
+/// rule, not a wire constant — the JS `uploadTexture` small-texture
+/// contract keeps its separate `spec::TEX_MAX_DIM` rule.
+pub const NATIVE_TEX_MAX_DIM: u32 = 8192;
+
 /// One uploaded texture. Pixels are copied into 16-byte-aligned storage so
 /// the PSP GE can sample them directly (the wasm rasterizer reads them via
 /// `Ui::texture`).
@@ -718,6 +725,59 @@ impl Ui {
             return -1;
         };
         self.upload_texture_flags(&blob[8..], w, h, psm, flags)
+    }
+
+    /// Register a NATIVELY produced image resource (host-side; there is no JS
+    /// op for this — the guest only ever sees the returned generation-tagged
+    /// handle plus caller-declared dimensions). This is the large-image seam
+    /// beside the JS-facing `upload_texture` small-texture contract, which
+    /// keeps its own pow2 <= spec::TEX_MAX_DIM rule untouched. Dimensions
+    /// must be 1..=NATIVE_TEX_MAX_DIM per axis (8192: the wgpu-default
+    /// `max_texture_dimension_2d` class; individual backends may still reject
+    /// beyond their own device limits). PSM_8888/4444/5650 only — photo-class
+    /// formats without a CLUT. `pixels` are the native producer's bytes,
+    /// copied into aligned core storage; nothing transits a guest heap.
+    /// Returns the generation-tagged handle, or -1 on malformed input.
+    pub fn register_native_texture(
+        &mut self,
+        pixels: &[u8],
+        w: u32,
+        h: u32,
+        psm: u32,
+        linear: bool,
+    ) -> i32 {
+        let bpp = match psm {
+            spec::psm::PSM_5650 | spec::psm::PSM_4444 => 2usize,
+            spec::psm::PSM_8888 => 4usize,
+            _ => return -1,
+        };
+        if w == 0 || h == 0 || w > NATIVE_TEX_MAX_DIM || h > NATIVE_TEX_MAX_DIM {
+            return -1;
+        }
+        let Some(byte_len) = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|px| px.checked_mul(bpp))
+        else {
+            return -1;
+        };
+        if pixels.len() < byte_len {
+            return -1;
+        }
+        let tex = Texture {
+            data: copy_aligned(pixels, byte_len),
+            byte_len,
+            w,
+            h,
+            psm,
+            palette: None,
+            linear,
+            revision: 0,
+        };
+        let handle = tex_alloc(&mut self.textures, &mut self.tex_free, tex);
+        if handle >= 0 {
+            self.bump_raster_revision();
+        }
+        handle
     }
 
     /// Decode ONE tile of a TILESET pak entry (spec op loadTileTexture; blob
@@ -1732,6 +1792,17 @@ impl Ui {
     /// bound for `texture_at` (the wgpu backend's texture-sync sweep).
     pub fn texture_slot_count(&self) -> usize {
         self.textures.len()
+    }
+
+    /// Sum of live texture pixel bytes. Host-side diagnostic for resource
+    /// lifetime evidence: registration raises it, `free_texture` drops it
+    /// synchronously — nothing here waits for a guest garbage collector.
+    pub fn texture_live_bytes(&self) -> usize {
+        self.textures
+            .iter()
+            .filter_map(|s| s.tex.as_ref())
+            .map(|t| t.byte_len)
+            .sum()
     }
 
     /// The live texture in `slot` plus its CURRENT generation-tagged handle

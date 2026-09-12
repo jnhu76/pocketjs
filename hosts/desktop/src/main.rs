@@ -32,6 +32,7 @@ mod net;
 include!("plan.rs");
 include!("supervisor.rs");
 include!("buttons.rs");
+include!("a2.rs");
 
 fn text_worker(pak: Vec<u8>) -> OffloadWorker {
     OffloadWorker::spawn(move || {
@@ -91,6 +92,7 @@ struct Runtime {
     click_edge: bool,
     mouse_down: bool,
     wire: Option<net::SvcWire>,
+    a2: A2Harness,
 }
 impl Runtime {
     fn boot(args: Args) -> Result<Self> {
@@ -131,6 +133,7 @@ impl Runtime {
             .svc_connect
             .clone()
             .map(|addr| net::SvcWire::spawn(addr, args.app.clone()));
+        let a2_harness = args.a2_harness;
         Ok(Self {
             viewport: args.viewport,
             script: args.script.clone(),
@@ -146,6 +149,7 @@ impl Runtime {
             click_edge: false,
             mouse_down: false,
             wire,
+            a2: A2Harness::new(a2_harness),
         })
     }
     fn svc(&self, event: Value) {
@@ -202,6 +206,7 @@ impl Runtime {
                 self.surface.svc_push(line);
             }
         }
+        self.a2.tick(self.ticks, &self.surface);
         self.run_script();
         if let Some((cps, start, dur)) = self.args.storm
             && self.ticks >= start
@@ -236,6 +241,11 @@ impl Runtime {
         }
         let mut intents = Vec::new();
         for line in self.surface.svc_drain() {
+            if line.starts_with("{\"t\":\"a2") {
+                // A2 boundary traffic: counted and logged, never an intent.
+                self.a2.observe_rx(&line);
+                continue;
+            }
             if let Some(wire) = &self.wire {
                 wire.send(line);
                 continue;
@@ -420,6 +430,8 @@ struct Host {
     ready: bool,
     announce_ready: bool,
     trace_frames: bool,
+    resize_at: Option<((u32, u32), u64)>,
+    resize_done: bool,
     failure: Option<String>,
 }
 impl Host {
@@ -606,6 +618,17 @@ impl ApplicationHandler<Wake> for Host {
                             window.request_redraw();
                         }
                     }
+                    if !self.resize_done
+                        && let Some(((w, h), at)) = self.resize_at
+                        && output.tick >= at
+                        && let Some(window) = &self.window
+                    {
+                        // Real OS-window resize: winit emits Resized, the
+                        // normal live-viewport path takes over from there.
+                        self.resize_done = true;
+                        eprintln!("A2EVENT,resize-window,{w},{h},atTick={at}");
+                        let _resized = window.request_inner_size(LogicalSize::new(w, h));
+                    }
                 }
             }
         }
@@ -741,6 +764,8 @@ fn main() -> Result<()> {
         ready: false,
         announce_ready: args.announce_ready,
         trace_frames: args.trace_frames,
+        resize_at: args.resize_at,
+        resize_done: false,
         failure: None,
     };
     host.startup = Some(RuntimeStartup {

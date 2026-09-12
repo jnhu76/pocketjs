@@ -254,6 +254,14 @@ struct Args {
     announce_ready: bool,
     /// Emit CPU stage timestamps for native frame profiling.
     trace_frames: bool,
+    /// Run the A2 native image-resource proof harness (`--a2-harness`):
+    /// native ≥4K pattern registration + bounded svc announcements +
+    /// native retirement, on a fixed schedule. Test material only.
+    a2_harness: bool,
+    /// Scripted real window resize: `--resize-at WxH@TICK` — once the
+    /// runtime reaches `tick`, the window thread resizes the actual OS
+    /// window so composition is proven through the real live-resize path.
+    resize_at: Option<((u32, u32), u64)>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -276,6 +284,8 @@ fn parse_args() -> Result<Args> {
         storm: None,
         announce_ready: false,
         trace_frames: false,
+        a2_harness: false,
+        resize_at: None,
     };
     let mut system_plan_path = None;
     let mut it = std::env::args().skip(1);
@@ -387,6 +397,14 @@ fn parse_args() -> Result<Args> {
             "--quit-after" => args.quit_after_ticks = Some(val("--quit-after")?.parse()?),
             "--announce-ready" => args.announce_ready = true,
             "--trace-frames" => args.trace_frames = true,
+            "--a2-harness" => args.a2_harness = true,
+            "--resize-at" => {
+                // --resize-at W,H@TICK — real OS-window resize (logical size).
+                let v = val("--resize-at")?;
+                let (wh, t) = v.rsplit_once('@').ok_or_else(|| anyhow!("--resize-at W,H@TICK"))?;
+                let (w, h) = wh.split_once(',').ok_or_else(|| anyhow!("--resize-at W,H@TICK"))?;
+                args.resize_at = Some(((w.parse()?, h.parse()?), t.parse()?));
+            }
             "--press" => {
                 // --press NAME@TICK (console button script: up/down/left/
                 // right/cross/circle/square/triangle/l/r/start/select)
@@ -439,6 +457,10 @@ fn parse_args() -> Result<Args> {
         args.js = None;
         args.pak = None;
         args.system = Some(system);
+    }
+    if args.a2_harness && !args.companions.iter().any(|name| name == A2_SERVICE) {
+        // The harness is the "companion" that feeds a2img lines over svc.
+        args.companions.push(A2_SERVICE.to_string());
     }
     Ok(args)
 }

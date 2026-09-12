@@ -144,4 +144,67 @@ mod tests {
         assert_eq!(plan.system_ui.package, "dev.pocket-stack.shell");
         assert!(plan.validate_for_host().is_ok());
     }
+
+    #[test]
+    fn a2_pattern_is_deterministic_and_diagnostic() {
+        let same = a2_pattern(A2_W, A2_H, 0) == a2_pattern(A2_W, A2_H, 0);
+        assert!(same, "the pattern must be a pure function of (w, h, variant)");
+        assert_ne!(a2_pattern(64, 64, 0), a2_pattern(64, 64, 1));
+        let pixels = a2_pattern(96, 64, 0);
+        assert_eq!(pixels.len(), 96 * 64 * 4);
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = (y * 96 + x) as usize * 4;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+        // Opaque everywhere (no half-composited ambiguity in the proof run).
+        assert!(pixels.iter().skip(3).step_by(4).all(|&a| a == 255));
+        // Border, quadrant fields, center crosshair and grid lines are all
+        // individually identifiable.
+        assert_eq!(at(0, 0), [255, 214, 0, 255]); // variant-0 border
+        assert_eq!(at(8, 8), [168, 32, 26, 255]); // top-left quadrant base
+        assert_eq!(at(85, 53), [190, 140, 24, 255]); // bottom-right quadrant
+        assert_eq!(at(48, 20), [250, 250, 250, 255]); // center vertical crosshair
+        assert_eq!(at(12, 10), at(30, 10)); // the every-6px grid line columns
+    }
+
+    #[test]
+    fn a2_harness_schedule_registers_announces_and_retires() {
+        // Full state machine over a real UiSurface: bounded svc lines only,
+        // native retirement drops bytes synchronously, and the schedule ends
+        // with every resource retired and a boundary summary.
+        let surface = UiSurface::new((720.0, 480.0));
+        let mut harness = A2Harness::new(true);
+        for tick in 0..=721 {
+            harness.tick(tick, &surface);
+        }
+        // The schedule's announcement count: A, B, retire A, 8 stress
+        // (announce + retire), retire R7 = 20 bounded svc lines.
+        assert_eq!(harness.tx_lines, 20);
+        assert!(harness.live.is_empty(), "the schedule retires everything");
+        let live_bytes = surface.with_ui(|ui| ui.texture_live_bytes());
+        assert_eq!(live_bytes, 0, "retirement is synchronous, not GC-bound");
+        assert!(harness.tx_bytes < 4096, "announcements are bounded semantic fields");
+    }
+
+    #[test]
+    fn a2_stale_handles_resolve_to_absence_end_to_end() {
+        let surface = UiSurface::new((64.0, 64.0));
+        let mut harness = A2Harness::new(true);
+        for tick in 0..=151 {
+            harness.tick(tick, &surface);
+        }
+        // A (announced at tick 2) and B (tick 150) are live.
+        assert_eq!(harness.live.len(), 2);
+        let handle_a = harness.live[0].1;
+        surface.with_ui(|ui| assert!(ui.texture(handle_a).is_some()));
+        for tick in 152..=301 {
+            harness.tick(tick, &surface);
+        }
+        // A was natively retired at tick 300: the handle is stale...
+        assert_eq!(harness.live.len(), 1);
+        surface.with_ui(|ui| assert!(ui.texture(handle_a).is_none()));
+        // ...and the slot table itself shows the synchronous release.
+        let slots = surface.with_ui(|ui| ui.texture_slot_count());
+        assert_eq!(slots, 2);
+    }
 }
