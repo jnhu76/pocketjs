@@ -258,6 +258,12 @@ struct Args {
     /// native ≥4K pattern registration + bounded svc announcements +
     /// native retirement, on a fixed schedule. Test material only.
     a2_harness: bool,
+    /// Run the A3 WIC-first JPEG proof harness (`--a3-harness`): the guest
+    /// requests files by bounded svc intent; the host decodes them with
+    /// Windows Imaging Component and publishes through the A2 seam. The
+    /// manifest is `--a3-file <PATH>` (repeatable, in request order).
+    a3_harness: bool,
+    a3_files: Vec<PathBuf>,
     /// Scripted real window resize: `--resize-at WxH@TICK` — once the
     /// runtime reaches `tick`, the window thread resizes the actual OS
     /// window so composition is proven through the real live-resize path.
@@ -285,6 +291,8 @@ fn parse_args() -> Result<Args> {
         announce_ready: false,
         trace_frames: false,
         a2_harness: false,
+        a3_harness: false,
+        a3_files: Vec::new(),
         resize_at: None,
     };
     let mut system_plan_path = None;
@@ -398,6 +406,14 @@ fn parse_args() -> Result<Args> {
             "--announce-ready" => args.announce_ready = true,
             "--trace-frames" => args.trace_frames = true,
             "--a2-harness" => args.a2_harness = true,
+            "--a3-harness" => args.a3_harness = true,
+            "--a3-file" => {
+                let path = PathBuf::from(val("--a3-file")?);
+                if !path.is_absolute() {
+                    return Err(anyhow!("--a3-file must be an absolute path"));
+                }
+                args.a3_files.push(path);
+            }
             "--resize-at" => {
                 // --resize-at W,H@TICK — real OS-window resize (logical size).
                 let v = val("--resize-at")?;
@@ -461,6 +477,13 @@ fn parse_args() -> Result<Args> {
     if args.a2_harness && !args.companions.iter().any(|name| name == A2_SERVICE) {
         // The harness is the "companion" that feeds a2img lines over svc.
         args.companions.push(A2_SERVICE.to_string());
+    }
+    if !args.a3_files.is_empty() != args.a3_harness {
+        return Err(anyhow!("--a3-harness requires --a3-file and vice versa"));
+    }
+    if args.a3_harness && !args.companions.iter().any(|name| name == A3_SERVICE) {
+        // The harness is the "companion" that answers a3open intents.
+        args.companions.push(A3_SERVICE.to_string());
     }
     Ok(args)
 }
