@@ -997,7 +997,8 @@ mod tests {
         // to the nearest integer sample density.
         assert_eq!(effective_density(2, Some(1.0)), 1);
         assert_eq!(effective_density(2, Some(2.0)), 2);
-        assert_eq!(effective_density(1, Some(2.0)), 2, "plan density is a floor for driven scales above it");
+        assert_eq!(effective_density(1, Some(2.0)), 2, "once driven, the scale alone governs (plan density is ignored)");
+        assert_eq!(effective_density(3, Some(1.0)), 1, "plan density is ignored once a scale is driven");
         assert_eq!(effective_density(2, Some(1.5)), 2);
         assert_eq!(effective_density(2, Some(1.25)), 1);
         assert_eq!(effective_density(2, Some(0.5)), 1, "never below 1x");
