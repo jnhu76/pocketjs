@@ -357,12 +357,21 @@ mod tests {
             &surface,
             &json!({"t": "a3open", "req": "r2", "path": missing}).to_string(), 0,
         );
+        harness.process_pending(&surface, 1);
         let lines = a3_sent(&harness);
-        assert_eq!(lines.len(), 2, "each request gets exactly one bounded reply");
+        assert_eq!(
+            lines.len(),
+            2,
+            "every queued request gets exactly one bounded reply"
+        );
+        // A5 drain semantics: r1 was superseded by r2 before any work ran,
+        // so it is answered with `cancelled`; the newest gets the real
+        // outcome and the harness does not wedge on failure.
         assert_eq!(lines[0]["t"], "a3error");
         assert_eq!(lines[0]["req"], "r1");
-        assert_eq!(lines[0]["code"], "missing");
-        assert_eq!(lines[1]["req"], "r2", "the harness does not wedge on failure");
+        assert_eq!(lines[0]["code"], "cancelled");
+        assert_eq!(lines[1]["req"], "r2");
+        assert_eq!(lines[1]["code"], "missing");
         assert_eq!(harness.failures, 2);
         assert_eq!(harness.successes, 0);
         let live = surface.with_ui(|ui| ui.texture_live_bytes());
@@ -647,6 +656,7 @@ mod tests {
                 .to_string(),
             0,
         );
+        harness.process_pending(&surface, 1);
         let lines = a3_sent(&harness);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["t"], "a3img");
@@ -675,6 +685,7 @@ mod tests {
             &json!({"t": "a4open", "req": "z1", "path": path}).to_string(),
             0,
         );
+        harness.process_pending(&surface, 1);
         let lines = a3_sent(&harness);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["t"], "a3error");
@@ -696,6 +707,7 @@ mod tests {
             &surface,
             &json!({"t": "a3open", "req": "r1", "path": path}).to_string(), 0,
         );
+        harness.process_pending(&surface, 1);
         let lines = a3_sent(&harness);
         assert_eq!(lines.len(), 1, "one bounded announcement per request");
         assert_eq!(lines[0]["t"], "a3img");
@@ -717,6 +729,7 @@ mod tests {
             &surface,
             &json!({"t": "a3open", "req": "r2", "path": path}).to_string(), 0,
         );
+        harness.process_pending(&surface, 2);
         let lines = a3_sent(&harness);
         assert_eq!(lines.len(), 2, "one bounded announcement per request");
         assert_eq!(lines[1]["t"], "a3img");
@@ -734,6 +747,211 @@ mod tests {
         // largest allowed line is the manifest — asserted far below it).
         let total_tx = harness.tx_bytes;
         assert!(total_tx < 4096, "svc traffic must be bounded, got {total_tx}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a5_rapid_requests_coalesce_and_only_the_newest_publishes() {
+        let surface = UiSurface::new((720.0, 480.0));
+        let mut harness = A3Harness::new(true, vec![]);
+        harness.boot(&surface);
+
+        let path = a3_write_fixture("stress.jpg", A3_FIXTURE_JPEG);
+        // 120 rapid requests through the real guest→host request seam: no
+        // decode may start inside the drain, every superseded request gets
+        // one bounded `cancelled` reply BEFORE any decode stage, and only
+        // the newest requested generation may decode and publish.
+        for i in 0..120 {
+            harness.observe_rx(
+                &surface,
+                &json!({"t": "a4open", "req": format!("s{i}"), "path": path,
+                        "fitW": 16, "fitH": 8}).to_string(),
+                i as u64,
+            );
+        }
+        assert!(a3_sent(&harness).is_empty(), "no work may start inside the drain");
+        harness.process_pending(&surface, 120);
+
+        let lines = a3_sent(&harness);
+        let cancels: Vec<&Value> =
+            lines.iter().filter(|l| l["code"] == "cancelled").collect();
+        let imgs: Vec<&Value> = lines.iter().filter(|l| l["t"] == "a3img").collect();
+        assert_eq!(cancels.len(), 119, "one bounded cancel per superseded request");
+        assert_eq!(imgs.len(), 1, "exactly one decode/publish for the whole burst");
+        assert_eq!(
+            imgs[0]["req"], "s119",
+            "the newest requested generation is the one published"
+        );
+        assert_eq!(harness.successes, 1);
+        let plane = 16 * 8 * 4;
+        assert_eq!(
+            surface.with_ui(|ui| ui.texture_live_bytes()),
+            plane,
+            "obsolete resources are already retired; exactly one plane lives"
+        );
+        // 120 requests produced bounded traffic, never pixel-sized lines.
+        assert!(harness.tx_bytes < 16 * 1024);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a5_interleaved_generations_publish_strictly_in_request_order() {
+        let surface = UiSurface::new((720.0, 480.0));
+        let mut harness = A3Harness::new(true, vec![]);
+        harness.boot(&surface);
+        let path = a3_write_fixture("gen.jpg", A3_FIXTURE_JPEG);
+
+        let mut published: Vec<String> = Vec::new();
+        let mut tick = 0u64;
+        // Three waves of 10 generations each. Each wave is drained once:
+        // the publish sequence must be exactly the newest generation of
+        // each wave, in wave order — an older generation can never publish
+        // over a newer one, and a newer one never skips an older wave's
+        // settled publish.
+        for wave in 0..3 {
+            for k in 0..10 {
+                harness.observe_rx(
+                    &surface,
+                    &json!({"t": "a4open", "req": format!("w{wave}k{k}"), "path": path,
+                            "fitW": 16, "fitH": 8}).to_string(),
+                    tick,
+                );
+                tick += 1;
+            }
+            let before = a3_sent(&harness).len();
+            harness.process_pending(&surface, tick);
+            let fresh = &a3_sent(&harness)[before..];
+            published.extend(
+                fresh.iter()
+                    .filter(|l| l["t"] == "a3img")
+                    .map(|l| l["req"].as_str().unwrap().to_string()),
+            );
+        }
+        assert_eq!(
+            published,
+            vec!["w0k9".to_string(), "w1k9".to_string(), "w2k9".to_string()],
+            "publish order is strictly newest-per-drain, never stale"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a5_hostile_batch_fails_bounded_and_recovers_without_crash() {
+        let surface = UiSurface::new((720.0, 480.0));
+        let mut harness = A3Harness::new(true, vec![]);
+        harness.boot(&surface);
+
+        // Each hostile input runs as the newest of its own drain so its
+        // real failure stage executes (a superseded input would be
+        // cancelled before decode — that path is covered by the coalesce
+        // test above).
+        let truncated = a3_write_fixture("trunc.jpg", &A3_FIXTURE_JPEG[..200]);
+        let fake = a3_write_fixture("fake.jpg", A3_FIXTURE_PNG);
+        let huge = a3_write_fixture("huge.jpg", &a3_huge_fixture(9000, 9000));
+        let absurd = a3_write_fixture("absurd.jpg", &a3_huge_fixture(u16::MAX, u16::MAX));
+        let good = a3_write_fixture("good.jpg", A3_FIXTURE_JPEG);
+        let missing = std::env::temp_dir().join("pocketjs-a5-does-not-exist.jpg");
+
+        let hostile: [(&str, PathBuf, &str); 5] = [
+            ("h0", missing, "missing"),
+            ("h1", fake, "not_jpeg"),
+            ("h2", truncated, "corrupt"),
+            ("h3", huge, "too_large"),
+            // 65535 per axis: above our admission bound; WIC's own decoder
+            // limit may also refuse it — either way the code is bounded.
+            ("h4", absurd, "too_large_or_corrupt"),
+        ];
+        for (i, (req, path, _)) in hostile.iter().enumerate() {
+            harness.observe_rx(
+                &surface,
+                &json!({"t": "a4open", "req": req, "path": path}).to_string(),
+                i as u64,
+            );
+            harness.process_pending(&surface, i as u64 + 1);
+        }
+        for (req, _, expected) in &hostile {
+            let hit = a3_sent(&harness).iter().rev().find(|l| &l["req"] == req)
+                .cloned()
+                .expect("each hostile request gets exactly one reply");
+            assert_eq!(hit["t"], "a3error");
+            if *expected == "too_large_or_corrupt" {
+                // The absurd-dimension header is rejected either by WIC's
+                // own decoder limit (corrupt) or by our admission check
+                // (too_large); both are bounded pre-allocation outcomes.
+                assert!(
+                    hit["code"] == "too_large" || hit["code"] == "corrupt",
+                    "absurd dims must degrade bounded, got {}",
+                    hit["code"]
+                );
+            } else {
+                assert_eq!(hit["code"], *expected);
+            }
+        }
+        assert_eq!(harness.successes, 0, "nothing hostile may publish");
+
+        // The process keeps serving: a valid request right after the
+        // hostile batch decodes, publishes, and owns exactly one plane.
+        harness.observe_rx(
+            &surface,
+            &json!({"t": "a4open", "req": "h5", "path": good, "fitW": 16, "fitH": 8})
+                .to_string(),
+            10,
+        );
+        harness.process_pending(&surface, 11);
+        let lines_after = a3_sent(&harness);
+        let imgs: Vec<&Value> =
+            lines_after.iter().filter(|l| l["t"] == "a3img").collect();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0]["req"], "h5");
+        assert_eq!(
+            surface.with_ui(|ui| ui.texture_live_bytes()),
+            16 * 8 * 4,
+            "exactly the newest valid plane is live after hostile inputs"
+        );
+        std::fs::remove_file(&good).ok();
+        for (_, path, _) in hostile {
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a5_cancellations_never_disturb_the_live_resource_or_boundary_budget() {
+        let surface = UiSurface::new((720.0, 480.0));
+        let mut harness = A3Harness::new(true, vec![]);
+        harness.boot(&surface);
+        let path = a3_write_fixture("live.jpg", A3_FIXTURE_JPEG);
+
+        // Settle one published image.
+        harness.observe_rx(
+            &surface,
+            &json!({"t": "a4open", "req": "r1", "path": path, "fitW": 16, "fitH": 8})
+                .to_string(),
+            0,
+        );
+        harness.process_pending(&surface, 1);
+
+        // A cancellation burst must leave the live resource untouched and
+        // the boundary traffic bounded (no pixel-sized line, no churn).
+        let tx_before = harness.tx_bytes;
+        for i in 0..50 {
+            harness.observe_rx(
+                &surface,
+                &json!({"t": "a4open", "req": format!("c{i}"), "path": path,
+                        "fitW": 16, "fitH": 8}).to_string(),
+                i as u64 + 2,
+            );
+        }
+        harness.process_pending(&surface, 52);
+        // Newest of the burst (c49) replaces r1; c0..c48 were cancelled.
+        assert_eq!(surface.with_ui(|ui| ui.texture_live_bytes()), 16 * 8 * 4);
+        assert_eq!(harness.successes, 2, "r1 + the newest of the burst only");
+        assert_eq!(harness.cancels, 49);
+        let per_request = (harness.tx_bytes - tx_before) / 50;
+        assert!(per_request < 512, "cancel replies are bounded, got {per_request} B/req");
         std::fs::remove_file(&path).ok();
     }
 }

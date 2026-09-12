@@ -547,9 +547,26 @@ struct A3Harness {
     rx_bytes: u64,
     successes: u64,
     failures: u64,
+    /// A5: requests superseded before any decode stage ran, and the
+    /// number of decode/publish cycles actually started.
+    cancels: u64,
+    decodes: u64,
+    /// A5: open requests accepted but not yet started. Draining coalesces
+    /// this queue to its newest entry (PRD §17: current-image work
+    /// in flight = 1) — superseded entries are cancelled before any
+    /// decode/register/upload stage, so a stale generation can never
+    /// publish over a newer one.
+    queued: Vec<A3QueuedOpen>,
     /// Exact host-pushed svc lines (bounded semantic state; mirrors the
     /// guest outbox for tests and the boundary audit).
     sent: Vec<String>,
+}
+
+struct A3QueuedOpen {
+    req: String,
+    path: std::path::PathBuf,
+    fit: Option<(u32, u32)>,
+    arrival_tick: u64,
 }
 
 impl A3Harness {
@@ -565,6 +582,9 @@ impl A3Harness {
             rx_bytes: 0,
             successes: 0,
             failures: 0,
+            cancels: 0,
+            decodes: 0,
+            queued: Vec::new(),
             sent: Vec::new(),
         }
     }
@@ -602,7 +622,7 @@ impl A3Harness {
                     return self.announce_error(surface, "?", "bad_request", tick);
                 }
                 match value["path"].as_str() {
-                    Some(path) => self.handle_open(surface, &req, path.into(), tick, None),
+                    Some(path) => self.queue_open(&req, path.into(), None, tick),
                     None => self.announce_error(surface, &req, "bad_request", tick),
                 }
             }
@@ -624,7 +644,7 @@ impl A3Harness {
                     }
                 };
                 match value["path"].as_str() {
-                    Some(path) => self.handle_open(surface, &req, path.into(), tick, fit),
+                    Some(path) => self.queue_open(&req, path.into(), fit, tick),
                     None => self.announce_error(surface, &req, "bad_request", tick),
                 }
             }
@@ -641,6 +661,53 @@ impl A3Harness {
         }
     }
 
+    /// Accept an open request into the pending queue. Pure bookkeeping:
+    /// nothing decodes here, so a burst of arrivals costs bounded state
+    /// (path strings + fit integers) and no decode/register/upload work.
+    fn queue_open(
+        &mut self,
+        req: &str,
+        path: std::path::PathBuf,
+        fit: Option<(u32, u32)>,
+        tick: u64,
+    ) {
+        let mode = if fit.is_some() { "fit" } else { "full" };
+        eprintln!(
+            "A3EVENT,open,req={req},path={},mode={mode},fit={},state=queued,tick={tick},epochUs={}",
+            path.display(),
+            fit.map_or(String::new(), |(w, h)| format!("{w}x{h}")),
+            epoch_us()
+        );
+        self.queued.push(A3QueuedOpen { req: req.to_string(), path, fit, arrival_tick: tick });
+    }
+
+    /// A5 coalescing drain: at most ONE decode runs per drain. Every
+    /// superseded request is answered with a bounded `cancelled` reply
+    /// BEFORE any decode/register/upload stage runs, so obsolete work is
+    /// cancelled at the earliest possible stage and the published
+    /// generation can only ever be the newest requested one. Called once
+    /// per tick by the host loop, after the svc drain.
+    fn process_pending(&mut self, surface: &UiSurface, tick: u64) {
+        if self.queued.is_empty() {
+            return;
+        }
+        let drained = std::mem::take(&mut self.queued);
+        for stale in &drained[..drained.len() - 1] {
+            self.cancels += 1;
+            eprintln!(
+                "A3EVENT,cancel,req={},arrivedTick={},supersededBy={},tick={tick},epochUs={}",
+                stale.req,
+                stale.arrival_tick,
+                drained.last().map(|n| n.req.as_str()).unwrap_or(""),
+                epoch_us()
+            );
+            self.announce_error(surface, &stale.req, "cancelled", tick);
+        }
+        let newest = drained.last().expect("queue was non-empty");
+        self.decodes += 1;
+        self.handle_open(surface, &newest.req, newest.path.clone(), newest.arrival_tick, newest.fit);
+    }
+
     fn handle_open(
         &mut self,
         surface: &UiSurface,
@@ -652,9 +719,7 @@ impl A3Harness {
         let all = Instant::now();
         let mode = if fit.is_some() { "fit" } else { "full" };
         eprintln!(
-            "A3EVENT,open,req={req},path={},mode={mode},fit={},tick={tick},epochUs={}",
-            path.display(),
-            fit.map_or(String::new(), |(w, h)| format!("{w}x{h}")),
+            "A3EVENT,decode,req={req},mode={mode},tick={tick},epochUs={}",
             epoch_us()
         );
         // T3_SOURCE_OPEN_BEGIN..file-in-memory: the source file handle is
@@ -760,9 +825,11 @@ impl A3Harness {
     /// traffic is bounded per resource/event and independent of pixel size.
     fn boundary(&self, current_plane: usize) {
         eprintln!(
-            "A3BOUNDARY,successes={},failures={},txLines={},txBytes={},rxLines={},rxBytes={},totalBytes={},currentPlane={}",
+            "A3BOUNDARY,successes={},failures={},cancels={},decodes={},txLines={},txBytes={},rxLines={},rxBytes={},totalBytes={},currentPlane={}",
             self.successes,
             self.failures,
+            self.cancels,
+            self.decodes,
             self.tx_lines,
             self.tx_bytes,
             self.rx_lines,

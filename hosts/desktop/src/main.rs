@@ -275,6 +275,11 @@ impl Runtime {
                 }
             }
         }
+        // A5 coalescing drain: exactly one decode per tick, newest
+        // requested generation only, superseded requests cancelled
+        // before any decode stage. Must run after the full drain so a
+        // burst queued in this tick collapses before work starts.
+        self.a3.process_pending(&self.surface, self.ticks);
         self.ticks += 1;
         Ok(intents)
     }
