@@ -1027,10 +1027,9 @@ fn main() -> Result<()> {
 fn trace_frame(enabled: bool, stage: &str, tick: u64, start: Instant) {
     if enabled {
         let elapsed = start.elapsed().as_micros();
-        let wall = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros();
+        // A7: `wall` is the same monotonic process clock as A3EVENT
+        // epochUs (epoch_us) — joins and deltas stay within one clock.
+        let wall = epoch_us();
         eprintln!("FRAME_TRACE,{stage},{tick},{wall},{elapsed}");
     }
 }

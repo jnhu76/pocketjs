@@ -19,11 +19,11 @@
 const A3_SERVICE: &str = "picoview-a3";
 
 /// Monotonic microseconds since first use in this process (BENCHMARK §5
-/// requires a monotonic clock for latency instrumentation). Joins A3
-/// events with FRAME_TRACE lines (which carry the same clock) for
-/// latency correlation. Deltas are monotonic; absolute values are NOT
-/// wall time — external correlation uses the stdout READY/IMGREADY
-/// markers instead.
+/// requires a monotonic clock for latency instrumentation). Shares one
+/// origin with the FRAME_TRACE `wall` field, so A3 events and frame
+/// traces join within a single clock. Deltas are monotonic; absolute
+/// values are NOT wall time — external correlation uses the stdout
+/// READY/IMGREADY markers instead.
 fn epoch_us() -> u128 {
     static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     ORIGIN.get_or_init(Instant::now).elapsed().as_micros()
