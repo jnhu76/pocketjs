@@ -33,6 +33,7 @@ include!("plan.rs");
 include!("supervisor.rs");
 include!("buttons.rs");
 include!("a2.rs");
+include!("a3.rs");
 
 fn text_worker(pak: Vec<u8>) -> OffloadWorker {
     OffloadWorker::spawn(move || {
@@ -93,6 +94,7 @@ struct Runtime {
     mouse_down: bool,
     wire: Option<net::SvcWire>,
     a2: A2Harness,
+    a3: A3Harness,
 }
 impl Runtime {
     fn boot(args: Args) -> Result<Self> {
@@ -134,7 +136,9 @@ impl Runtime {
             .clone()
             .map(|addr| net::SvcWire::spawn(addr, args.app.clone()));
         let a2_harness = args.a2_harness;
-        Ok(Self {
+        let a3_harness_active = args.a3_harness;
+        let a3_files = args.a3_files.clone();
+        let mut runtime = Self {
             viewport: args.viewport,
             script: args.script.clone(),
             args,
@@ -150,7 +154,10 @@ impl Runtime {
             mouse_down: false,
             wire,
             a2: A2Harness::new(a2_harness),
-        })
+            a3: A3Harness::new(a3_harness_active, a3_files),
+        };
+        runtime.a3.boot(&runtime.surface);
+        Ok(runtime)
     }
     fn svc(&self, event: Value) {
         self.surface.svc_push(event.to_string());
@@ -244,6 +251,12 @@ impl Runtime {
             if line.starts_with("{\"t\":\"a2") {
                 // A2 boundary traffic: counted and logged, never an intent.
                 self.a2.observe_rx(&line);
+                continue;
+            }
+            if line.starts_with("{\"t\":\"a3") {
+                // A3 file intents/acks: handled by the WIC harness, never an
+                // intent.
+                self.a3.observe_rx(&self.surface, &line);
                 continue;
             }
             if let Some(wire) = &self.wire {
