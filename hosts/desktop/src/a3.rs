@@ -18,13 +18,15 @@
 
 const A3_SERVICE: &str = "picoview-a3";
 
-/// Wall-clock epoch microseconds — joins A3 events with FRAME_TRACE lines
-/// (which carry the same clock) for first-image timestamp correlation.
+/// Monotonic microseconds since first use in this process (BENCHMARK §5
+/// requires a monotonic clock for latency instrumentation). Joins A3
+/// events with FRAME_TRACE lines (which carry the same clock) for
+/// latency correlation. Deltas are monotonic; absolute values are NOT
+/// wall time — external correlation uses the stdout READY/IMGREADY
+/// markers instead.
 fn epoch_us() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros()
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_micros()
 }
 
 /// EXIF `Orientation` quarter-turn component (clockwise).

@@ -35,6 +35,18 @@ include!("buttons.rs");
 include!("a2.rs");
 include!("a3.rs");
 
+/// A7: monotonic milliseconds since process start, for startup phase
+/// attribution (BENCHMARK §5 monotonic clock).
+fn proc_ms() -> u128 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis()
+}
+
+/// A7: one stderr line per startup phase (attribution evidence).
+fn phase(name: &str) {
+    eprintln!("A7EVENT,phase,{name},{}ms", proc_ms());
+}
+
 fn text_worker(pak: Vec<u8>) -> OffloadWorker {
     OffloadWorker::spawn(move || {
         let mut engine = pocket_text::Engine::new();
@@ -123,6 +135,8 @@ struct Runtime {
     wire: Option<net::SvcWire>,
     a2: A2Harness,
     a3: A3Harness,
+    /// A7: successes already reported as `imgready` intents.
+    seen_successes: u64,
 }
 impl Runtime {
     fn boot(args: Args) -> Result<Self> {
@@ -184,6 +198,7 @@ impl Runtime {
             wire,
             a2: A2Harness::new(a2_harness),
             a3: A3Harness::new(a3_harness_active, a3_files),
+            seen_successes: 0,
         };
         runtime.a3.boot(&runtime.surface);
         Ok(runtime)
@@ -325,6 +340,13 @@ impl Runtime {
         // before any decode stage. Must run after the full drain so a
         // burst queued in this tick collapses before work starts.
         self.a3.process_pending(&self.surface, self.ticks);
+        // A7: one `imgready` intent per newly bound image — the host turns
+        // the first corresponding present submission into the IMGREADY
+        // marker (T6 present-submitted, first useful image proxy).
+        if self.a3.successes > self.seen_successes {
+            self.seen_successes = self.a3.successes;
+            intents.push(json!({"t": "imgready"}));
+        }
         self.ticks += 1;
         Ok(intents)
     }
@@ -399,6 +421,7 @@ fn run_runtime(
     let available = Arc::new(AtomicBool::new(true));
     let mut renderer = gpu::Renderer::new(gpu);
     let mut runtime = Runtime::boot(args)?;
+    phase("runtime_boot_done");
     let mut hash = None;
     let mut intents = Vec::new();
     let mut deadline = Instant::now();
@@ -492,6 +515,10 @@ struct Host {
     clipboard: Option<arboard::Clipboard>,
     ready: bool,
     announce_ready: bool,
+    /// A7: an image was bound and its first present submission has not
+    /// been marked yet (T6 first-useful-image proxy).
+    image_pending: bool,
+    image_announced: bool,
     trace_frames: bool,
     resize_at: Option<((u32, u32), u64)>,
     resize_done: bool,
@@ -614,6 +641,15 @@ impl Host {
                 println!("READY {}", epoch_ms());
             }
         }
+        if self.image_pending {
+            self.image_pending = false;
+            if self.announce_ready && !self.image_announced {
+                // A7: T6 present-submitted for the first useful image —
+                // the startup probe's second marker.
+                self.image_announced = true;
+                println!("IMGREADY {}", epoch_ms());
+            }
+        }
         Ok(())
     }
 }
@@ -682,6 +718,7 @@ impl ApplicationHandler<Wake> for Host {
                 return;
             }
         };
+        phase("gpu_ready");
         let gpu = presentation.gpu.clone();
         self.surface = Some(presentation);
         let RuntimeStartup {
@@ -690,6 +727,7 @@ impl ApplicationHandler<Wake> for Host {
             outputs,
             proxy,
         } = self.startup.take().expect("runtime startup");
+        phase("runtime_thread_spawning");
         if let Err(error) = thread::Builder::new()
             .name("pocket-runtime".into())
             .spawn(move || {
@@ -718,6 +756,11 @@ impl ApplicationHandler<Wake> for Host {
                 while let Ok(mut output) = self.rx.try_recv() {
                     for v in std::mem::take(&mut output.intents) {
                         match v["t"].as_str() {
+                            Some("imgready") => {
+                                // A7: an image was bound; the next
+                                // successful present is its T6.
+                                self.image_pending = true;
+                            }
                             Some("copy") => {
                                 if let (Some(clipboard), Some(text)) =
                                     (&mut self.clipboard, v["text"].as_str())
@@ -917,9 +960,11 @@ impl ApplicationHandler<Wake> for Host {
     }
 }
 fn main() -> Result<()> {
+    phase("main_entry");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = parse_args()?;
     let event_loop = EventLoop::<Wake>::with_user_event().build()?;
+    phase("event_loop_built");
     let (tx, inputs) = sync_channel(256);
     let (outputs, rx) = sync_channel(1);
     let mut host = Host {
@@ -940,6 +985,8 @@ fn main() -> Result<()> {
         clipboard: arboard::Clipboard::new().ok(),
         ready: false,
         announce_ready: args.announce_ready,
+        image_pending: false,
+        image_announced: false,
         trace_frames: args.trace_frames,
         resize_at: args.resize_at,
         resize_done: false,
