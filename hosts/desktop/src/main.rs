@@ -253,9 +253,9 @@ impl Runtime {
                 self.a2.observe_rx(&line);
                 continue;
             }
-            if line.starts_with("{\"t\":\"a3") {
-                // A3 file intents/acks: handled by the WIC harness, never an
-                // intent.
+            if line.starts_with("{\"t\":\"a3") || line.starts_with("{\"t\":\"a4") {
+                // A3/A4 file intents, acks and geometry reports: handled by
+                // the WIC harness, never an app intent.
                 self.a3.observe_rx(&self.surface, &line, self.ticks);
                 continue;
             }

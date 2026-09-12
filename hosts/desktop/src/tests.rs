@@ -548,6 +548,52 @@ mod tests {
         assert_white(right_col, "orient-7 right column");
     }
 
+    // ------------------------------------------------------------------
+    // A4 scaled-decode probes (WIC inbox JPEG source-transform path).
+    // The 32x16 fixture supports exact DCT scales 1/1, 1/2, 1/4, 1/8:
+    // 32x16, 16x8, 8x4, 4x2.
+    // ------------------------------------------------------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn a4_source_transform_reports_closest_native_size() {
+        // Exact native scale: requested 8x4 is exactly the 1/4 DCT scale.
+        let probe = probe_source_transform(&A3_FIXTURE_JPEG, 8, 4).expect("probe");
+        assert!(probe.supported, "inbox JPEG decoder must expose the source-transform path");
+        assert_eq!((probe.native_w, probe.native_h), (8, 4));
+
+        // Requests larger than the source never upscale.
+        let probe = probe_source_transform(&A3_FIXTURE_JPEG, 64, 32).expect("probe");
+        assert_eq!((probe.native_w, probe.native_h), (32, 16));
+
+        // Non-power-of-two requests snap to a supported DCT scale — the
+        // measured choice is recorded, only membership is asserted here so
+        // the test does not encode this machine's tie-breaking.
+        let probe = probe_source_transform(&A3_FIXTURE_JPEG, 7, 3).expect("probe");
+        assert!(
+            [(8, 4), (4, 2)].contains(&(probe.native_w, probe.native_h)),
+            "closest size must snap to a DCT scale, got {}x{}",
+            probe.native_w,
+            probe.native_h
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a4_scaled_decode_produces_oriented_plane_at_native_size() {
+        // Orientation 6: stored 32x16 → displayed 16x32; DCT 1/4 gives
+        // stored 8x4 → displayed 4x8. The request is expressed in DISPLAY
+        // space and inverted internally before the stored-space query.
+        let out = decode_jpeg_wic_scaled(&jpeg_with_exif_orientation(6), 4, 8)
+            .expect("scaled decode");
+        assert_eq!(out.decoded.orientation, 6);
+        assert!(out.via_source_transform, "must use the decoder's own scaling");
+        assert_eq!((out.native_w, out.native_h), (8, 4), "closest stored size");
+        assert_eq!((out.decoded.w, out.decoded.h), (4, 8), "oriented display size");
+        assert_eq!(out.decoded.pixels.len(), 4 * 8 * 4);
+        assert!(out.decoded.pixels.iter().skip(3).step_by(4).all(|&a| a == 255));
+    }
+
     #[cfg(windows)]
     #[test]
     fn a3_wic_rejects_corrupt_and_mislabeled_content_with_bounded_codes() {
@@ -565,19 +611,77 @@ mod tests {
         // Absurd-but-declared dimensions are rejected before allocation:
         // 9000 per axis is inside WIC's own limit (65500) but above the
         // native admission bound (8192), so OUR check must fire first.
+        let huge = a3_huge_fixture(9000, 9000);
+        assert!(matches!(
+            decode_jpeg_wic(&huge),
+            Err(A3DecodeError::TooLarge)
+        ));
+    }
+
+    /// The plain fixture with its SOF0 dimensions patched to the given
+    /// (illegal-for-admission) values: header parses, pixels cannot exist.
+    fn a3_huge_fixture(w: u16, h: u16) -> Vec<u8> {
         let mut huge = A3_FIXTURE_JPEG.to_vec();
         let sof = huge
             .windows(2)
             .position(|w| w == [0xff, 0xc0])
             .expect("fixture has SOF0");
-        huge[sof + 5] = 0x23;
-        huge[sof + 6] = 0x28; // height 9000
-        huge[sof + 7] = 0x23;
-        huge[sof + 8] = 0x28; // width 9000
-        assert!(matches!(
-            decode_jpeg_wic(&huge),
-            Err(A3DecodeError::TooLarge)
-        ));
+        huge[sof + 5] = (h >> 8) as u8;
+        huge[sof + 6] = (h & 0xff) as u8;
+        huge[sof + 7] = (w >> 8) as u8;
+        huge[sof + 8] = (w & 0xff) as u8;
+        huge
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a4_fit_request_decodes_scaled_and_announces_native_size() {
+        let surface = UiSurface::new((720.0, 480.0));
+        let mut harness = A3Harness::new(true, vec![]);
+        harness.boot(&surface);
+
+        let path = a3_write_fixture("fit.jpg", A3_FIXTURE_JPEG);
+        harness.observe_rx(
+            &surface,
+            &json!({"t": "a4open", "req": "f1", "path": path, "fitW": 8, "fitH": 4})
+                .to_string(),
+            0,
+        );
+        let lines = a3_sent(&harness);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["t"], "a3img");
+        assert_eq!(lines[0]["req"], "f1");
+        assert_eq!(lines[0]["mode"], "fit");
+        assert_eq!(lines[0]["nativeW"], 8);
+        assert_eq!(lines[0]["nativeH"], 4);
+        assert_eq!(lines[0]["w"], 8);
+        assert_eq!(lines[0]["h"], 4);
+        assert_eq!(surface.with_ui(|ui| ui.texture_live_bytes()), 8 * 4 * 4);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a4_full_request_on_oversized_source_degrades_explicitly() {
+        let surface = UiSurface::new((720.0, 480.0));
+        let mut harness = A3Harness::new(true, vec![]);
+        harness.boot(&surface);
+
+        let path = a3_write_fixture("huge.jpg", &a3_huge_fixture(9000, 9000));
+        // A 100% (no fit dims) request on an over-admission source must
+        // produce a bounded, explicit degrade — never an allocation.
+        harness.observe_rx(
+            &surface,
+            &json!({"t": "a4open", "req": "z1", "path": path}).to_string(),
+            0,
+        );
+        let lines = a3_sent(&harness);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["t"], "a3error");
+        assert_eq!(lines[0]["req"], "z1");
+        assert_eq!(lines[0]["code"], "too_large");
+        assert_eq!(surface.with_ui(|ui| ui.texture_live_bytes()), 0);
+        std::fs::remove_file(&path).ok();
     }
 
     #[cfg(windows)]
