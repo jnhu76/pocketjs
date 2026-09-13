@@ -322,6 +322,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(feature = "bench-harness")]
     fn a3_write_fixture(name: &str, bytes: &[u8]) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!("pocketjs-a3-{}-{name}", std::process::id()));

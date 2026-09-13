@@ -527,6 +527,7 @@ fn run_runtime(
             .quit_after_ticks
             .is_some_and(|n| runtime.ticks >= n)
         {
+            memprobe::stage("settled_quit");
             return Ok(());
         }
         deadline += Duration::from_nanos(1_000_000_000 / 60);
@@ -893,7 +894,7 @@ impl ApplicationHandler<Wake> for Host {
         while self.scale_done < self.scale_at_instant.len()
             && self.scale_at_instant[self.scale_done].2 <= Instant::now()
         {
-            let (scale, tick, due) = self.scale_at_instant[self.scale_done];
+            let (scale, tick, _due) = self.scale_at_instant[self.scale_done];
             self.scale_done += 1;
             self.apply_scale(scale, tick);
         }
@@ -1024,11 +1025,15 @@ impl ApplicationHandler<Wake> for Host {
     }
 }
 fn main() -> Result<()> {
+    // Anchor the monotonic phase clock at true process entry — before any
+    // init cost — so A7EVENT phase values are same-origin across builds
+    // regardless of which phase lines the measurement flag lets print.
+    let _entry_anchor = proc_ms();
+    let args = parse_args()?;
+    MEASUREMENT_TRACING.store(args.announce_ready, Ordering::Relaxed);
     phase("main_entry");
     memprobe::stage("process_entry");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = parse_args()?;
-    MEASUREMENT_TRACING.store(args.announce_ready, Ordering::Relaxed);
     let event_loop = EventLoop::<Wake>::with_user_event().build()?;
     phase("event_loop_built");
     memprobe::stage("event_loop_built");
