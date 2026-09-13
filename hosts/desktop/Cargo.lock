@@ -1814,6 +1814,7 @@ dependencies = [
  "pocket-ui-wgpu",
  "pocket3d",
  "pocketjs-core",
+ "pollster",
  "raw-window-handle",
  "serde",
  "serde_json",

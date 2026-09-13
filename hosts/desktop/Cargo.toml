@@ -30,6 +30,10 @@ serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
+# CROSS-OS-NORMALIZED-DESKTOP-STARTUP-1 arm-B control example: blocks on the
+# same async adapter/device requests the full host performs inside pocket3d.
+# 0.4.0 is already locked transitively (pocket3d); the lockfile is unchanged.
+pollster = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 # Bounded WIC decoder integration for the A3 proof harness (imaging +

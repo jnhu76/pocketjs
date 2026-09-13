@@ -30,6 +30,7 @@ use winit::{
 mod gpu;
 mod memprobe;
 mod net;
+mod norm;
 include!("plan.rs");
 include!("supervisor.rs");
 include!("buttons.rs");
@@ -160,13 +161,18 @@ impl Runtime {
                 "text.layout.native is unavailable; use the portable text offload capability"
             ));
         }
+        norm::once("E81_ASSET_READ_BEGIN");
         let pak = std::fs::read(resolve_asset(args.pak.clone(), &args.app, "pak")?)?;
         let source = std::fs::read_to_string(resolve_asset(args.js.clone(), &args.app, "js")?)?;
+        norm::set_guest(&args.app, source.as_bytes(), &pak);
         memprobe::stage("boot_assets_read");
+        norm::once("E82_ASSET_READ_END");
+        norm::once("E83_UI_SURFACE_BEGIN");
         let surface = UiSurface::new_with_density(
             (args.viewport.0 as f32, args.viewport.1 as f32),
             args.density,
         );
+        norm::once("E84_UI_SURFACE_END");
         memprobe::stage("boot_ui_surface");
         surface.set_identity(HOST_ID, HOST_ABI);
         surface.set_tick_rate(60);
@@ -174,12 +180,16 @@ impl Runtime {
         surface.feed_pak(&pak);
         let supervisor = AppSupervisor::new(args.system.as_ref(), &surface)?;
         memprobe::stage("boot_supervisor");
+        norm::once("E85_QUICKJS_BEGIN");
         let guest = Guest::new()?;
+        norm::once("E86_QUICKJS_END");
         memprobe::stage("boot_quickjs");
         surface.mount(&guest)?;
         let offload = text_worker(pak);
         offload.mount(&guest)?;
+        norm::once("E87_GUEST_EVAL_BEGIN");
         guest.eval(&args.app, &source)?;
+        norm::once("E88_GUEST_EVAL_END");
         memprobe::stage("boot_guest_eval");
         if !guest.has_frame() {
             return Err(anyhow!("bundle installed no frame handler"));
@@ -384,8 +394,10 @@ impl Runtime {
             self.buttons
         };
         self.guest.frame(buttons)?;
+        norm::once("E101_GUEST_FRAME_DONE");
         self.click_edge = false;
         self.surface.tick();
+        norm::once("E102_SURFACE_TICK_DONE");
         for (id, error) in self
             .supervisor
             .sync(&self.surface)
@@ -517,12 +529,15 @@ fn run_runtime(
     // existed overlapped the first decode but destabilized the P95 tail
     // (three-way startup contention), so ticks stay renderer-gated.
     let mut runtime = Runtime::boot(args)?;
+    norm::once("E89_RUNTIME_BOOT_DONE");
     phase("runtime_boot_done");
     memprobe::stage("runtime_boot_done");
+    norm::once("E90_RENDERER_BEGIN");
     let gpu = gpu_rx
         .recv()
         .map_err(|_| anyhow!("GPU initialization failed; renderer cannot start"))?;
     let mut renderer = gpu::Renderer::new(gpu);
+    norm::once("E91_RENDERER_READY");
     phase("runtime_renderer_ready");
     memprobe::stage("runtime_renderer_ready");
     let mut hash = None;
@@ -535,6 +550,7 @@ fn run_runtime(
             }
         }
         let work_start = Instant::now();
+        norm::once("E100_FIRST_TICK_BEGIN");
         intents.extend(runtime.tick()?);
         trace_frame(runtime.args.trace_frames, "tick", runtime.ticks, work_start);
         if intents.iter().any(|v| v["t"] == "quit") {
@@ -548,6 +564,7 @@ fn run_runtime(
             && let Some(permit) = OutputPermit::acquire(&available)
         {
             let target = if hash != Some(next) {
+                norm::once("E110_RENDER_BEGIN");
                 let start = Instant::now();
                 let frame = renderer.render(&mut runtime)?;
                 trace_frame(
@@ -572,7 +589,9 @@ fn run_runtime(
                     if rendered {
                         hash = Some(next);
                     }
+                    norm::once("E120_WAKE_SEND_BEGIN");
                     let _ = proxy.send_event(Wake::Output);
+                    norm::once("E121_WAKE_SEND_END");
                 }
                 Err(std::sync::mpsc::TrySendError::Full(output)) => intents = output.intents,
                 Err(_) => return Ok(()),
@@ -653,6 +672,9 @@ struct Host {
     clipboard: Option<arboard::Clipboard>,
     ready: bool,
     announce_ready: bool,
+    /// CROSS-OS-NORMALIZED-DESKTOP-STARTUP-1: host-side identity JSON
+    /// (args + source identity) merged into the BENCHMARK_CONFIG line.
+    norm_cfg: Option<String>,
     /// A7: an image was bound and its first present submission has not
     /// been marked yet (T6 first-useful-image proxy).
     image_pending: bool,
@@ -780,6 +802,8 @@ impl Host {
         if !self.ready {
             self.ready = true;
             memprobe::stage("first_present");
+            norm::once("E190_FIRST_USABLE_PRESENT_SUBMITTED");
+            self.emit_benchmark_config();
             if self.announce_ready {
                 println!("READY {}", epoch_ms());
             }
@@ -795,9 +819,27 @@ impl Host {
         }
         Ok(())
     }
+
+    /// CROSS-OS-NORMALIZED-DESKTOP-STARTUP-1: one `BENCHMARK_CONFIG` line at
+    /// the first usable present, when every contributing identity (host
+    /// args, GPU adapter/surface policy, guest artifacts) is known. Emitted
+    /// only on measurement runs (`NORMTRACE=1`).
+    fn emit_benchmark_config(&self) {
+        let mut config = self
+            .norm_cfg
+            .as_deref()
+            .and_then(|base| serde_json::from_str::<Value>(base).ok())
+            .unwrap_or_else(|| json!({}));
+        if let Some(surface) = &self.surface {
+            config["gpu"] = surface.adapter_summary();
+        }
+        config["guest"] = json!(norm::guest_id().unwrap_or_else(|| "none".into()));
+        norm::emit_config(&config.to_string());
+    }
 }
 impl ApplicationHandler<Wake> for Host {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        norm::once("E11_EVENT_LOOP_READY");
         if self.window.is_some() {
             return;
         }
@@ -815,6 +857,7 @@ impl ApplicationHandler<Wake> for Host {
                 let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             }
         }
+        norm::once("E20_WINDOW_CREATE_BEGIN");
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -825,6 +868,22 @@ impl ApplicationHandler<Wake> for Host {
                 )
                 .expect("create window"),
         );
+        // Normalized-raster measurement affordance: pin the physical client
+        // size to logical × forced-scale so the raster is 720x480 physical
+        // client pixels on BOTH hosts regardless of monitor DPI (same
+        // request_inner_size pattern as the A6 apply_scale path). No-op at
+        // scale 1.0 where the created window already matches.
+        if let Some(scale) = norm::forced_scale() {
+            self.scale_override = Some(scale);
+            self.scale_driven = true;
+            let _resized = window.request_inner_size(PhysicalSize::new(
+                (self.viewport.0 as f64 * scale).round() as u32,
+                (self.viewport.1 as f64 * scale).round() as u32,
+            ));
+        }
+        window.set_ime_allowed(true);
+        norm::once("E21_WINDOW_CREATE_END");
+        memprobe::stage("window_created");
         #[cfg(windows)]
         {
             // A6: prove the created window actually runs under PMv2.
@@ -854,8 +913,6 @@ impl ApplicationHandler<Wake> for Host {
                 }
             }
         }
-        window.set_ime_allowed(true);
-        memprobe::stage("window_created");
         // C1: the runtime thread spawns BEFORE the GPU path completes — its
         // guest boot (QuickJS + bundle eval) runs concurrently with
         // adapter/device/surface initialization, and only the renderer build
@@ -873,6 +930,7 @@ impl ApplicationHandler<Wake> for Host {
         if let Err(error) = thread::Builder::new()
             .name("pocket-runtime".into())
             .spawn(move || {
+                norm::once("E80_RUNTIME_THREAD_BEGIN");
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_runtime(args, inputs, outputs, proxy.clone(), gpu_rx)
                 }))
@@ -920,6 +978,7 @@ impl ApplicationHandler<Wake> for Host {
                 event_loop.exit();
             }
             Wake::Output => {
+                norm::once("E122_WAKE_RECEIVED");
                 while let Ok(mut output) = self.rx.try_recv() {
                     for v in std::mem::take(&mut output.intents) {
                         match v["t"].as_str() {
@@ -975,6 +1034,7 @@ impl ApplicationHandler<Wake> for Host {
                         self.frame = Some((output.tick, target));
                         if let Some(window) = &self.window {
                             window.request_redraw();
+                            norm::once("E130_REQUEST_REDRAW");
                         }
                     }
                     #[cfg(feature = "bench-harness")]
@@ -1038,6 +1098,7 @@ impl ApplicationHandler<Wake> for Host {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                norm::once("E131_REDRAW_CALLBACK");
                 if let Err(error) = self.present() {
                     log::error!("{error}");
                     self.failure = Some(error.to_string());
@@ -1149,15 +1210,43 @@ fn main() -> Result<()> {
     // Anchor the monotonic phase clock at true process entry — before any
     // init cost — so A7EVENT phase values are same-origin across builds
     // regardless of which phase lines the measurement flag lets print.
+    norm::init();
+    pocket3d::gpu::set_norm_mark(Some(norm::once));
     let _entry_anchor = proc_ms();
+    norm::once("E00_MAIN_ENTRY");
     let args = parse_args()?;
     MEASUREMENT_TRACING.store(args.announce_ready, Ordering::Relaxed);
     phase("main_entry");
     memprobe::stage("process_entry");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    norm::once("E10_EVENT_LOOP_BEGIN");
     let event_loop = EventLoop::<Wake>::with_user_event().build()?;
     phase("event_loop_built");
     memprobe::stage("event_loop_built");
+    // CROSS-OS-NORMALIZED-DESKTOP-STARTUP-1: host-side identity captured
+    // while `args` is still alive; merged with GPU + guest identity at the
+    // first usable present (BENCHMARK_CONFIG).
+    let norm_cfg = json!({
+        "arm": "C-full-pocketjs",
+        "target_id": HOST_ID,
+        "host_abi": HOST_ABI,
+        "pocketjs_sha": env!("POCKETJS_GIT_SHA"),
+        "pocketjs_tree": env!("POCKETJS_GIT_TREE"),
+        "app": args.app,
+        "logical_viewport": [args.viewport.0, args.viewport.1],
+        "raster_density": args.density,
+        "force_scale": norm::forced_scale(),
+        "gpu_backend_policy": format!("{:?}", gpu::Presentation::gpu_policy()),
+        "pocket_gpu_backend_env":
+            std::env::var("POCKET_GPU_BACKEND").unwrap_or_else(|_| "unset".into()),
+        "power_preference": "LowPower",
+        "present_mode": "Fifo",
+        "desired_maximum_frame_latency": 1,
+        "force_fallback_adapter": false,
+        "quit_after_ticks": args.quit_after_ticks,
+        "clock": "process-local Instant; origin E00_MAIN_ENTRY",
+    })
+    .to_string();
     let (tx, inputs) = sync_channel(256);
     let (outputs, rx) = sync_channel(1);
     let mut host = Host {
@@ -1178,6 +1267,7 @@ fn main() -> Result<()> {
         clipboard: arboard::Clipboard::new().ok(),
         ready: false,
         announce_ready: args.announce_ready,
+        norm_cfg: Some(norm_cfg),
         image_pending: false,
         image_announced: false,
         trace_frames: args.trace_frames,
@@ -1220,7 +1310,9 @@ fn main() -> Result<()> {
     if let Err(error) = thread::Builder::new()
         .name("pocket-gpu-instance".into())
         .spawn(move || {
+            norm::once("E30_GPU_INSTANCE_BEGIN");
             let instance = gpu::Presentation::create_instance();
+            norm::once("E31_GPU_INSTANCE_END");
             let _ = instance_tx.send(instance);
         })
     {

@@ -21,6 +21,25 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
 }
 
+/// CROSS-OS-NORMALIZED-DESKTOP-STARTUP-1 measurement hook: a host may install
+/// a marker fn so adapter/device stage boundaries land on ONE monotonic
+/// origin with the experiment's E-series vocabulary. Unset (the default)
+/// costs one `OnceLock` load per boundary and prints nothing.
+pub type NormMark = fn(&'static str);
+static NORM_MARK: std::sync::OnceLock<NormMark> = std::sync::OnceLock::new();
+
+pub fn set_norm_mark(mark: Option<NormMark>) {
+    if let Some(mark) = mark {
+        let _ = NORM_MARK.set(mark);
+    }
+}
+
+fn norm_mark(event: &'static str) {
+    if let Some(mark) = NORM_MARK.get() {
+        mark(event);
+    }
+}
+
 impl Gpu {
     /// Create a device with no surface (offscreen rendering only).
     pub fn new_headless() -> Result<Self> {
@@ -127,6 +146,7 @@ impl Gpu {
         power_preference: wgpu::PowerPreference,
         memory_hints: wgpu::MemoryHints,
     ) -> Result<Self> {
+        norm_mark("E50_ADAPTER_BEGIN");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference,
@@ -135,6 +155,7 @@ impl Gpu {
             })
             .await
             .context("no compatible GPU adapter")?;
+        norm_mark("E51_ADAPTER_END");
         let info = adapter.get_info();
         log::info!(
             "adapter: {:?} ({:?}, requested {:?})",
@@ -142,6 +163,7 @@ impl Gpu {
             info.device_type,
             power_preference
         );
+        norm_mark("E60_DEVICE_BEGIN");
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("pocket3d"),
@@ -152,6 +174,7 @@ impl Gpu {
             })
             .await
             .context("failed to create wgpu device")?;
+        norm_mark("E61_DEVICE_END");
         Ok(Self {
             instance,
             adapter,

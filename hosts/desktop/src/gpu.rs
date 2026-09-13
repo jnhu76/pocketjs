@@ -95,6 +95,7 @@ impl Renderer {
         let Some(frame) = self.acquire_target(size)? else {
             return Ok(None);
         };
+        crate::norm::once("E112_RENDER_TARGET_READY");
         let active: HashSet<u32> = runtime
             .supervisor
             .instances
@@ -163,6 +164,7 @@ impl Renderer {
         }
         runtime.surface.with_ui(|ui| -> Result<()> {
             let words = ui.draw().words.clone();
+            crate::norm::once("E111_DRAWLIST_READY");
             self.shell.render_words_scaled(
                 &self.gpu,
                 ui,
@@ -175,6 +177,7 @@ impl Renderer {
             )
         })?;
         self.gpu.queue.submit([encoder.finish()]);
+        crate::norm::once("E113_RENDER_QUEUE_SUBMIT");
         Ok(Some(frame))
     }
 }
@@ -191,15 +194,29 @@ impl Presentation {
     /// POCKET_GPU_BACKEND is a measurement affordance so backend candidates
     /// are measured on ONE binary; unset means the evidence-backed default.
     /// Portability seam stays in pocket3d: other hosts keep defaults.
+    ///
+    /// CROSS-OS-NORMALIZED-DESKTOP-STARTUP-1: `POCKET_GPU_BACKEND=VULKAN`
+    /// selects (Backends::VULKAN, MemoryHints::MemoryUsage) on EVERY host so
+    /// the normalized arm runs one explicit policy on both OSes. Per-OS
+    /// unset defaults are UNCHANGED: Windows keeps its evidence-backed
+    /// (VULKAN, MemoryUsage); other hosts keep the portable defaults.
     pub fn gpu_policy() -> (wgpu::Backends, wgpu::MemoryHints) {
-        #[cfg(windows)]
         match std::env::var("POCKET_GPU_BACKEND").as_deref() {
+            Ok("VULKAN") => (wgpu::Backends::VULKAN, wgpu::MemoryHints::MemoryUsage),
+            #[cfg(windows)]
             Ok("DX12") => (wgpu::Backends::DX12, wgpu::MemoryHints::MemoryUsage),
             Ok("DEFAULT") => (wgpu::Backends::default(), wgpu::MemoryHints::MemoryUsage),
-            _ => (wgpu::Backends::VULKAN, wgpu::MemoryHints::MemoryUsage),
+            _ => {
+                #[cfg(windows)]
+                {
+                    (wgpu::Backends::VULKAN, wgpu::MemoryHints::MemoryUsage)
+                }
+                #[cfg(not(windows))]
+                {
+                    (wgpu::Backends::default(), wgpu::MemoryHints::default())
+                }
+            }
         }
-        #[cfg(not(windows))]
-        (wgpu::Backends::default(), wgpu::MemoryHints::default())
     }
 
     /// The wgpu instance, created off-thread at process entry (C1 evidence):
@@ -214,7 +231,9 @@ impl Presentation {
     pub fn new(window: Arc<Window>, instance: wgpu::Instance) -> Result<Self> {
         let hints = Self::gpu_policy().1;
         crate::memprobe::stage("gpu_surface_created");
+        crate::norm::once("E40_SURFACE_CREATE_BEGIN");
         let surface = instance.create_surface(window.clone())?;
+        crate::norm::once("E41_SURFACE_CREATE_END");
         let gpu = Arc::new(Gpu::from_instance_for_surface_with_options(
             instance,
             &surface,
@@ -223,7 +242,9 @@ impl Presentation {
         )?);
         crate::phase("gpu_adapter_device");
         crate::memprobe::stage("gpu_adapter_device");
+        crate::norm::once("E70_SURFACE_CAPS_BEGIN");
         let caps = surface.get_capabilities(&gpu.adapter);
+        crate::norm::once("E71_SURFACE_CAPS_END");
         // Encoded byte-space color matches package colors and the portable
         // rasterizer. Avoid an additional sRGB conversion on final presentation.
         let format = [
@@ -244,7 +265,9 @@ impl Presentation {
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
         };
+        crate::norm::once("E72_SURFACE_CONFIG_BEGIN");
         surface.configure(&gpu.device, &config);
+        crate::norm::once("E73_SURFACE_CONFIG_END");
         crate::phase("gpu_surface_configured");
         crate::memprobe::stage("gpu_surface_configured");
         let info = gpu.adapter.get_info();
@@ -261,6 +284,22 @@ impl Presentation {
             blits: Vec::new(),
         })
     }
+
+    /// CROSS-OS-NORMALIZED-DESKTOP-STARTUP-1: adapter + surface-configuration
+    /// identity for the BENCHMARK_CONFIG line.
+    pub fn adapter_summary(&self) -> serde_json::Value {
+        let info = self.gpu.adapter.get_info();
+        serde_json::json!({
+            "adapter": info.name,
+            "adapter_backend": format!("{:?}", info.backend),
+            "device_type": format!("{:?}", info.device_type),
+            "surface_format": format!("{:?}", self.config.format),
+            "alpha_mode": format!("{:?}", self.config.alpha_mode),
+            "present_mode": format!("{:?}", self.config.present_mode),
+            "desired_maximum_frame_latency": self.config.desired_maximum_frame_latency,
+            "surface_size": [self.config.width, self.config.height],
+        })
+    }
     pub fn present(&mut self, window: &Window, target: &Arc<Target>) -> Result<bool> {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -271,6 +310,7 @@ impl Presentation {
             self.config.height = size.height;
             self.surface.configure(&self.gpu.device, &self.config);
         }
+        crate::norm::once("E140_GET_TEXTURE_BEGIN");
         let output = match self.surface.get_current_texture() {
             Ok(output) => output,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -284,8 +324,10 @@ impl Presentation {
             }
             Err(error) => return Err(error.into()),
         };
+        crate::norm::once("E141_GET_TEXTURE_END");
         // Weak identities retain bind groups without leasing a frame from the
         // worker's bounded pool. Rebuild only when the pool changes on resize.
+        crate::norm::once("E150_BLIT_BEGIN");
         self.blits.retain(|(frame, _)| frame.strong_count() > 0);
         let key = Arc::downgrade(target);
         let index = match self
@@ -306,7 +348,9 @@ impl Presentation {
                 self.blits.len() - 1
             }
         };
+        crate::norm::once("E151_BLIT_END");
         let view = output.texture.create_view(&Default::default());
+        crate::norm::once("E160_PRESENT_ENCODE_BEGIN");
         let mut encoder = self
             .gpu
             .device
@@ -330,9 +374,14 @@ impl Presentation {
             });
             self.blits[index].1.draw(&mut pass);
         }
+        crate::norm::once("E161_PRESENT_ENCODE_END");
         self.gpu.queue.submit([encoder.finish()]);
+        crate::norm::once("E162_PRESENT_QUEUE_SUBMIT");
         window.pre_present_notify();
+        crate::norm::once("E170_PRE_PRESENT_NOTIFY");
+        crate::norm::once("E180_PRESENT_BEGIN");
         output.present();
+        crate::norm::once("E181_PRESENT_RETURN");
         Ok(true)
     }
 }
