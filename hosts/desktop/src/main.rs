@@ -28,6 +28,7 @@ use winit::{
     window::{CursorIcon, Window, WindowId},
 };
 mod gpu;
+mod memprobe;
 mod net;
 include!("plan.rs");
 include!("supervisor.rs");
@@ -147,20 +148,25 @@ impl Runtime {
         }
         let pak = std::fs::read(resolve_asset(args.pak.clone(), &args.app, "pak")?)?;
         let source = std::fs::read_to_string(resolve_asset(args.js.clone(), &args.app, "js")?)?;
+        memprobe::stage("boot_assets_read");
         let surface = UiSurface::new_with_density(
             (args.viewport.0 as f32, args.viewport.1 as f32),
             args.density,
         );
+        memprobe::stage("boot_ui_surface");
         surface.set_identity(HOST_ID, HOST_ABI);
         surface.set_tick_rate(60);
         surface.set_svc_allowlist(args.companions.clone());
         surface.feed_pak(&pak);
         let supervisor = AppSupervisor::new(args.system.as_ref(), &surface)?;
+        memprobe::stage("boot_supervisor");
         let guest = Guest::new()?;
+        memprobe::stage("boot_quickjs");
         surface.mount(&guest)?;
         let offload = text_worker(pak);
         offload.mount(&guest)?;
         guest.eval(&args.app, &source)?;
+        memprobe::stage("boot_guest_eval");
         if !guest.has_frame() {
             return Err(anyhow!("bundle installed no frame handler"));
         }
@@ -345,6 +351,7 @@ impl Runtime {
         // marker (T6 present-submitted, first useful image proxy).
         if self.a3.successes > self.seen_successes {
             self.seen_successes = self.a3.successes;
+            memprobe::stage("image_bound");
             intents.push(json!({"t": "imgready"}));
         }
         self.ticks += 1;
@@ -420,8 +427,10 @@ fn run_runtime(
 ) -> Result<()> {
     let available = Arc::new(AtomicBool::new(true));
     let mut renderer = gpu::Renderer::new(gpu);
+    memprobe::stage("runtime_renderer_ready");
     let mut runtime = Runtime::boot(args)?;
     phase("runtime_boot_done");
+    memprobe::stage("runtime_boot_done");
     let mut hash = None;
     let mut intents = Vec::new();
     let mut deadline = Instant::now();
@@ -637,6 +646,7 @@ impl Host {
         trace_frame(self.trace_frames, "present-submit", *tick, start);
         if !self.ready {
             self.ready = true;
+            memprobe::stage("first_present");
             if self.announce_ready {
                 println!("READY {}", epoch_ms());
             }
@@ -710,6 +720,7 @@ impl ApplicationHandler<Wake> for Host {
             }
         }
         window.set_ime_allowed(true);
+        memprobe::stage("window_created");
         let presentation = match gpu::Presentation::new(window.clone()) {
             Ok(presentation) => presentation,
             Err(error) => {
@@ -719,6 +730,7 @@ impl ApplicationHandler<Wake> for Host {
             }
         };
         phase("gpu_ready");
+        memprobe::stage("gpu_ready");
         let gpu = presentation.gpu.clone();
         self.surface = Some(presentation);
         let RuntimeStartup {
@@ -961,10 +973,12 @@ impl ApplicationHandler<Wake> for Host {
 }
 fn main() -> Result<()> {
     phase("main_entry");
+    memprobe::stage("process_entry");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = parse_args()?;
     let event_loop = EventLoop::<Wake>::with_user_event().build()?;
     phase("event_loop_built");
+    memprobe::stage("event_loop_built");
     let (tx, inputs) = sync_channel(256);
     let (outputs, rx) = sync_channel(1);
     let mut host = Host {

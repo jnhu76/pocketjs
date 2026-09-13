@@ -188,12 +188,15 @@ pub struct Presentation {
 impl Presentation {
     pub fn new(window: Arc<Window>) -> Result<Self> {
         let instance = Gpu::new_instance();
+        crate::memprobe::stage("gpu_instance");
         let surface = instance.create_surface(window.clone())?;
+        crate::memprobe::stage("gpu_surface_created");
         let gpu = Arc::new(Gpu::from_instance_for_surface_with_power_preference(
             instance,
             &surface,
             wgpu::PowerPreference::LowPower,
         )?);
+        crate::memprobe::stage("gpu_adapter_device");
         let caps = surface.get_capabilities(&gpu.adapter);
         // Encoded byte-space color matches package colors and the portable
         // rasterizer. Avoid an additional sRGB conversion on final presentation.
@@ -216,6 +219,7 @@ impl Presentation {
             view_formats: vec![],
         };
         surface.configure(&gpu.device, &config);
+        crate::memprobe::stage("gpu_surface_configured");
         let info = gpu.adapter.get_info();
         log::info!(
             "Pocket UI GPU: {:?} / {} / {:?}",
