@@ -58,19 +58,40 @@ impl super::Adapter {
     ) -> Option<crate::ExposedAdapter<super::Api>> {
         // Create the device so that we can get the capabilities.
         // AUDIT-ONLY markers (E50e/E50f): the D3D12CreateDevice capability
-        // probe seam inside adapter exposure.
-        crate::norm_hook::norm_mark("E50e_CREATE_DEVICE_BEGIN");
+        // probe seam inside adapter exposure. Indexed per expose round so
+        // once-per-process markers distinguish multiple DXGI adapters
+        // (0..=3 slots; further adapters are not separately marked).
+        static EXPOSE_INDEX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let expose_idx =
+            EXPOSE_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match expose_idx {
+            0 => crate::norm_hook::norm_mark("E50e0_CREATE_DEVICE_0_BEGIN"),
+            1 => crate::norm_hook::norm_mark("E50e1_CREATE_DEVICE_1_BEGIN"),
+            2 => crate::norm_hook::norm_mark("E50e2_CREATE_DEVICE_2_BEGIN"),
+            _ => {}
+        }
         let device = {
             profiling::scope!("ID3D12Device::create_device");
             library
                 .create_device(&adapter, Direct3D::D3D_FEATURE_LEVEL_11_0)
                 .ok()??
         };
-        crate::norm_hook::norm_mark("E50f_CREATE_DEVICE_END");
+        match expose_idx {
+            0 => crate::norm_hook::norm_mark("E50f0_CREATE_DEVICE_0_END"),
+            1 => crate::norm_hook::norm_mark("E50f1_CREATE_DEVICE_1_END"),
+            2 => crate::norm_hook::norm_mark("E50f2_CREATE_DEVICE_2_END"),
+            _ => {}
+        }
 
         // AUDIT-ONLY markers (E50g/E50h): feature/limits/description query
-        // seam (CheckFeatureSupport, GetDesc2, …) to the end of expose.
-        crate::norm_hook::norm_mark("E50g_FEATURE_QUERIES_BEGIN");
+        // seam (CheckFeatureSupport, GetDesc2, …) to the end of expose,
+        // indexed like the create-device probe.
+        match expose_idx {
+            0 => crate::norm_hook::norm_mark("E50g0_FEATURE_QUERIES_0_BEGIN"),
+            1 => crate::norm_hook::norm_mark("E50g1_FEATURE_QUERIES_1_BEGIN"),
+            2 => crate::norm_hook::norm_mark("E50g2_FEATURE_QUERIES_2_BEGIN"),
+            _ => {}
+        }
         profiling::scope!("feature queries");
 
         // Detect the highest supported feature level.
@@ -100,6 +121,28 @@ impl super::Adapter {
         let desc = unsafe { adapter.GetDesc2() }.unwrap();
 
         let device_name = auxil::dxgi::conv::map_adapter_name(desc.Description);
+
+        // AUDIT-ONLY: name each exposed DXGI adapter (indexed) so the
+        // probe-cost decomposition identifies its subject. Self-gated by
+        // NORMTRACE; stderr, one line per adapter; no hook dependency.
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static TRACE: AtomicBool = AtomicBool::new(false);
+            static INIT: std::sync::Once = std::sync::Once::new();
+            INIT.call_once(|| {
+                TRACE.store(
+                    matches!(std::env::var("NORMTRACE").as_deref(), Ok("1")),
+                    Ordering::Relaxed,
+                );
+            });
+            if TRACE.load(Ordering::Relaxed) {
+                let luid = &desc.AdapterLuid;
+                eprintln!(
+                    "AUDIT_DXGI_ADAPTER,idx={expose_idx},name={device_name},vid={:#x},pid={:#x},luid={:x}-{:x}",
+                    desc.VendorId, desc.DeviceId, luid.HighPart, luid.LowPart
+                );
+            }
+        }
 
         let mut features_architecture = Direct3D12::D3D12_FEATURE_DATA_ARCHITECTURE::default();
 
@@ -517,7 +560,12 @@ impl super::Adapter {
         let max_color_attachment_bytes_per_sample =
             max_color_attachments * wgt::TextureFormat::MAX_TARGET_PIXEL_BYTE_COST;
 
-        crate::norm_hook::norm_mark("E50h_FEATURE_QUERIES_END");
+        match expose_idx {
+            0 => crate::norm_hook::norm_mark("E50h0_FEATURE_QUERIES_0_END"),
+            1 => crate::norm_hook::norm_mark("E50h1_FEATURE_QUERIES_1_END"),
+            2 => crate::norm_hook::norm_mark("E50h2_FEATURE_QUERIES_2_END"),
+            _ => {}
+        }
         Some(crate::ExposedAdapter {
             adapter: super::Adapter {
                 raw: adapter,
