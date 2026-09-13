@@ -66,10 +66,14 @@ impl OffloadWorker {
     pub fn begin_frame(&self) {
         self.inner.delivered.set(false);
     }
-    /// C3: requests submitted but whose replies the guest has not taken
-    /// yet. Non-zero means the worker can still produce guest-visible
-    /// state, so an event-driven host must keep ticking.
+    /// C3: requests whose replies the guest has not taken yet. Zero means
+    /// the worker can produce no further guest-visible state — either
+    /// nothing is outstanding, or the worker has exited (a dead worker
+    /// never replies, so leaked credit must not disable parking forever).
     pub fn outstanding(&self) -> usize {
+        if self.inner.session.load(Ordering::Acquire) <= 0 {
+            return 0;
+        }
         self.inner.credit.load(Ordering::Acquire)
     }
     pub fn mount(&self, guest: &Guest) -> Result<()> {

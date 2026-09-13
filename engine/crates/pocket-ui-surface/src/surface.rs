@@ -276,10 +276,19 @@ impl UiSurface {
     }
 
     /// C3: whether any native animation state needs continuous ticks right
-    /// now (tween/spring tracks, baked timelines). Never true while the
-    /// core is paused.
+    /// now (tween/spring tracks, baked timelines, animated sprites). This
+    /// reads the live animation states — it can be true while the core is
+    /// debug-paused (pause stops the advance, it does not clear the states).
     pub fn animating(&self) -> bool {
         self.inner.borrow().ui.animating()
+    }
+
+    /// C3: whether any host-pushed service lines await the guest's next
+    /// frame poll. While this is true the guest-visible state can still
+    /// change without a new input, so an event-driven host must run at
+    /// least one more tick before parking.
+    pub fn svc_guest_pending(&self) -> bool {
+        !self.inner.borrow().svc_in.is_empty()
     }
 
     /// C3: the guest's static-frames declaration. Set only through the
@@ -708,6 +717,29 @@ mod tests {
             .unwrap();
         assert!(!surface.guest_static());
         assert!(!surface.animating(), "a fresh core has no live animation");
+    }
+
+    #[test]
+    fn svc_guest_pending_tracks_the_inbound_queue() {
+        // C3 review BLOCKER regression: a host-pushed service line (e.g. an
+        // A3 reply pushed after the guest's frame of the same tick) awaits
+        // the guest's next frame poll; parking while it sits in the queue
+        // would strand it. The accessor must see it until the guest polls.
+        let guest = Guest::new().unwrap();
+        let surface = UiSurface::new((16.0, 16.0));
+        assert!(!surface.svc_guest_pending());
+        surface.mount(&guest).unwrap();
+        surface.svc_push("{\"t\":\"a3img\"}");
+        assert!(surface.svc_guest_pending(), "pushed line is guest-pending");
+        guest
+            .eval("poll", "globalThis.batch = ui.svcPoll();")
+            .unwrap();
+        let batch: String = guest.with(|ctx| ctx.globals().get("batch").unwrap());
+        assert!(batch.contains("a3img"), "guest polled the line: {batch:?}");
+        assert!(
+            !surface.svc_guest_pending(),
+            "polled queue must not block parking"
+        );
     }
 
     #[test]

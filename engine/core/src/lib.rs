@@ -1308,12 +1308,23 @@ impl Ui {
 
     // ---- frame -------------------------------------------------------------
 
-    /// C3: whether any native animation state (tween/spring tracks or baked
-    /// timeline instances) currently needs continuous ticks. Hosts may use
-    /// this together with the guest's static-frames declaration to park the
-    /// worker between events; a `true` here always forbids parking.
+    /// C3: whether any native animation state currently needs continuous
+    /// ticks — tween/spring tracks, baked timeline instances, or animated
+    /// sprites (set_sprite auto-plays from the frame counter). Hosts may
+    /// use this together with the guest's static-frames declaration to
+    /// park the worker between events; a `true` here always forbids
+    /// parking. Note `debug_pause` does not clear any of these states, so
+    /// this can legitimately be true while paused.
     pub fn animating(&self) -> bool {
-        self.anims.tracks.iter().any(|t| t.alive) || self.timelines.iter().any(|t| t.alive)
+        if self.anims.tracks.iter().any(|t| t.alive)
+            || self.timelines.iter().any(|t| t.alive)
+        {
+            return true;
+        }
+        self.tree
+            .slots
+            .iter()
+            .any(|n| n.alive && n.sprite_frames > 1)
     }
 
     /// Advance one frame: tick animations by exactly one `set_tick_rate`

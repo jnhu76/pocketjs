@@ -242,6 +242,15 @@ impl Runtime {
         if !self.surface.guest_static() || self.surface.animating() {
             return false;
         }
+        // Review BLOCKER fix: the A3 (and any native) handler pushes
+        // service replies AFTER the guest's frame of the same tick; the
+        // guest consumes svc lines only by polling in its next frame. A
+        // non-empty inbound queue therefore means the guest-visible state
+        // can still change without an input — parking here would strand
+        // the reply (a multi-file walk stalls with an undelivered image).
+        if self.surface.svc_guest_pending() {
+            return false;
+        }
         if self.offload.outstanding() > 0 || self.wire.is_some() {
             return false;
         }
