@@ -1308,6 +1308,14 @@ impl Ui {
 
     // ---- frame -------------------------------------------------------------
 
+    /// C3: whether any native animation state (tween/spring tracks or baked
+    /// timeline instances) currently needs continuous ticks. Hosts may use
+    /// this together with the guest's static-frames declaration to park the
+    /// worker between events; a `true` here always forbids parking.
+    pub fn animating(&self) -> bool {
+        self.anims.tracks.iter().any(|t| t.alive) || self.timelines.iter().any(|t| t.alive)
+    }
+
     /// Advance one frame: tick animations by exactly one `set_tick_rate`
     /// step, then re-run layout if dirty. Call once per vblank, BEFORE
     /// `draw()`.

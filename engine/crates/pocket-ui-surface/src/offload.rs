@@ -66,6 +66,12 @@ impl OffloadWorker {
     pub fn begin_frame(&self) {
         self.inner.delivered.set(false);
     }
+    /// C3: requests submitted but whose replies the guest has not taken
+    /// yet. Non-zero means the worker can still produce guest-visible
+    /// state, so an event-driven host must keep ticking.
+    pub fn outstanding(&self) -> usize {
+        self.inner.credit.load(Ordering::Acquire)
+    }
     pub fn mount(&self, guest: &Guest) -> Result<()> {
         guest.mount("offload", |ctx, ns| {
             let m = self.inner.clone();
@@ -130,7 +136,13 @@ mod tests {
         }
         guest.eval("queue", "if(offload.session()<=0)throw Error('not ready'); for(let i=0;i<8;i++)if(!offload.submit('test'))throw Error('no credit'); if(offload.submit('overflow'))throw Error('unbounded queue');").unwrap();
         thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(worker.outstanding(), 8, "every submit is an un-taken reply");
         worker.begin_frame();
         guest.eval("reply", "if(offload.take()!=='test')throw Error('no reply'); if(offload.take()!==undefined)throw Error('multiple deliveries');").unwrap();
+        assert_eq!(
+            worker.outstanding(),
+            7,
+            "taking one reply releases exactly one credit"
+        );
     }
 }

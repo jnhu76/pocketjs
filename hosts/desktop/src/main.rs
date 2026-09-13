@@ -231,6 +231,40 @@ impl Runtime {
     fn svc(&self, event: Value) {
         self.surface.svc_push(event.to_string());
     }
+    /// C3: every source that can change guest-visible state without an
+    /// input arriving must be quiet before the worker parks on the input
+    /// channel (a blocking `recv` — the only wait that carries a wakeup).
+    /// Conservative by construction: the guest's static-frames declaration
+    /// is required, native animations forbid parking, and harness
+    /// schedules, pending text-offload replies, child instances, a network
+    /// svc wire, and the measurement quit path all keep the 60 Hz loop.
+    fn can_suspend(&self) -> bool {
+        if !self.surface.guest_static() || self.surface.animating() {
+            return false;
+        }
+        if self.offload.outstanding() > 0 || self.wire.is_some() {
+            return false;
+        }
+        if !self.supervisor.instances.is_empty() {
+            return false;
+        }
+        if self.args.quit_after_ticks.is_some() || self.args.trace_frames {
+            return false;
+        }
+        #[cfg(feature = "bench-harness")]
+        {
+            if !self.script.is_empty() || self.args.storm.is_some() {
+                return false;
+            }
+            if !self.a3.queued.is_empty() {
+                return false;
+            }
+            if self.a2.active && self.a2.done < A2_SCHEDULE.len() {
+                return false;
+            }
+        }
+        true
+    }
     fn input(&mut self, input: Input) -> Result<bool> {
         match input {
             Input::Quit => return Ok(false),
@@ -540,11 +574,37 @@ fn run_runtime(
             memprobe::stage("settled_quit");
             return Ok(());
         }
-        deadline += Duration::from_nanos(1_000_000_000 / 60);
-        if let Some(wait) = deadline.checked_duration_since(Instant::now()) {
-            thread::sleep(wait);
-        } else {
+        if intents.is_empty() && hash == Some(next) && runtime.can_suspend() {
+            // C3: event-driven idle suspend. Nothing is pending and the
+            // guest declared static frames, so park on the input channel —
+            // no 60 Hz wake, no guest JS, no tick bookkeeping — until a
+            // real event arrives, then run one tick immediately (deadline
+            // reset; no catch-up burst).
+            if MEASUREMENT_TRACING.load(Ordering::Relaxed) {
+                static SUSPENDED: AtomicBool = AtomicBool::new(false);
+                if !SUSPENDED.swap(true, Ordering::Relaxed) {
+                    eprintln!("C3EVENT,suspend,{}ms,tick={}", proc_ms(), runtime.ticks);
+                }
+            }
+            match inputs.recv() {
+                Ok(input) => {
+                    if MEASUREMENT_TRACING.load(Ordering::Relaxed) {
+                        eprintln!("C3EVENT,wake,{}ms,tick={}", proc_ms(), runtime.ticks);
+                    }
+                    if !runtime.input(input)? {
+                        return Ok(());
+                    }
+                }
+                Err(_) => return Ok(()),
+            }
             deadline = Instant::now();
+        } else {
+            deadline += Duration::from_nanos(1_000_000_000 / 60);
+            if let Some(wait) = deadline.checked_duration_since(Instant::now()) {
+                thread::sleep(wait);
+            } else {
+                deadline = Instant::now();
+            }
         }
     }
 }

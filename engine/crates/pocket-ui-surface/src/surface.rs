@@ -89,6 +89,10 @@ struct Inner {
     /// not match their target (framework/src/host.ts assertNativeHostContract).
     host_id: String,
     host_abi: Option<u32>,
+    /// C3: the guest's static-frames declaration (`ui.__pocketStaticFrames`).
+    /// False by default — a bundle that never calls it keeps the host's
+    /// continuous tick loop, so existing content cannot change behavior.
+    guest_static: bool,
 }
 
 /// The `ui` surface. Clone-cheap handle; single-threaded like the guest.
@@ -124,6 +128,7 @@ impl UiSurface {
                 svc_allowlist: Vec::new(),
                 host_id: "desktop".into(),
                 host_abi: None,
+                guest_static: false,
             })),
         }
     }
@@ -268,6 +273,20 @@ impl UiSurface {
     /// the guest turn, before rendering).
     pub fn tick(&self) {
         self.inner.borrow_mut().ui.tick();
+    }
+
+    /// C3: whether any native animation state needs continuous ticks right
+    /// now (tween/spring tracks, baked timelines). Never true while the
+    /// core is paused.
+    pub fn animating(&self) -> bool {
+        self.inner.borrow().ui.animating()
+    }
+
+    /// C3: the guest's static-frames declaration. Set only through the
+    /// `ui.__pocketStaticFrames` binding installed by `mount`; see there
+    /// for the contract.
+    pub fn guest_static(&self) -> bool {
+        self.inner.borrow().guest_static
     }
 
     /// Install a native text measurer (docs/BACKENDS.md). Call before
@@ -614,6 +633,23 @@ impl UiSurface {
             // which is why set_tick_rate must precede mount.
             ns.set("__tickHz", inner.ui.tick_rate())?;
 
+            // C3: the guest's static-frames declaration. Contract: the
+            // bundle asserts it produces NO guest-visible state change
+            // without an input event, a service reply, or a native
+            // animation — every per-frame change is driven by something the
+            // host already wakes on. Hosts may then park their worker while
+            // `!animating()` and nothing is pending; a bundle that animates
+            // from its own frame callback must never call this. Off by
+            // default: bundles that never call it keep the continuous tick
+            // loop, so existing content cannot change behavior.
+            let ui = self.inner.clone();
+            ns.set(
+                "__pocketStaticFrames",
+                Function::new(ctx.clone(), move |active: bool| {
+                    ui.borrow_mut().guest_static = active;
+                })?,
+            )?;
+
             Ok(())
         })
     }
@@ -651,6 +687,27 @@ mod tests {
             .unwrap();
         let open: bool = guest.with(|ctx| ctx.globals().get("serviceOpen").unwrap());
         assert!(!open);
+    }
+
+    #[test]
+    fn static_frames_declaration_is_off_by_default_and_bindable() {
+        // C3: a bundle that never calls __pocketStaticFrames keeps the
+        // host's continuous tick loop (guest_static stays false); only an
+        // explicit declaration flips it, and it is reversible.
+        let guest = Guest::new().unwrap();
+        let surface = UiSurface::new((16.0, 16.0));
+        assert!(!surface.guest_static());
+        surface.mount(&guest).unwrap();
+        assert!(!surface.guest_static(), "mount must not declare staticness");
+        guest
+            .eval("decl", "ui.__pocketStaticFrames(true);")
+            .unwrap();
+        assert!(surface.guest_static());
+        guest
+            .eval("undcl", "ui.__pocketStaticFrames(false);")
+            .unwrap();
+        assert!(!surface.guest_static());
+        assert!(!surface.animating(), "a fresh core has no live animation");
     }
 
     #[test]

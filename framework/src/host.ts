@@ -232,6 +232,12 @@ export interface HostOps {
    *  means the spec default 60 — hosts that predate per-realm rates only
    *  ever ran 60. Bundles bake their rate (`--hz`) and refuse another. */
   __tickHz?: number;
+  /** C3 static-frames declaration: the bundle asserts it produces NO
+   *  guest-visible state change without an input event, a service reply,
+   *  or a native animation. Hosts may then park their worker between
+   *  events (UiSurface.guestStatic). A bundle that animates from its own
+   *  frame callback must never set this; pass false to retract. */
+  __pocketStaticFrames?(active: boolean): void;
   /** Pocket System package id -> compositor surface handle. Separate from the
    *  texture namespace: compositor surfaces are not images. */
   __surfaces?: Record<string, number>;
