@@ -5,10 +5,12 @@
 //! with the EXACT normalized policy the full host runs, on ONE monotonic
 //! origin with the same E-series vocabulary.
 //!
-//! Normalized policy (identical to the full host's normalized arm):
-//! backend VULKAN, power preference LowPower, memory hints MemoryUsage,
+//! Normalized policy (identical to the full host's normalized arm except
+//! backend selection): power preference LowPower, memory hints MemoryUsage,
 //! present mode Fifo, desired_maximum_frame_latency 1, Bgra8Unorm-preferred
 //! format policy, alpha Auto, empty features, default limits, no fallback.
+//! Backend: POCKET_GPU_BACKEND selector (WINDOWS-STARTUP-CALLPATH-REALITY-
+//! AUDIT-1; Windows audit default DX12, explicit VULKAN opt-in preserved).
 //!
 //! Endpoint semantics: `E190_FIRST_USABLE_PRESENT_SUBMITTED` is the return
 //! of the first successful `SurfaceTexture::present()` (present SUBMITTED —
@@ -37,8 +39,27 @@ struct App {
     presents: u32,
 }
 
+/// WINDOWS-STARTUP-CALLPATH-REALITY-AUDIT-1: arm B follows the same
+/// POCKET_GPU_BACKEND selector as the full host's gpu_policy() so the
+/// ablation arm measures the production Windows backend. The audit default
+/// on Windows is DX12 (Vulkan stayed only as an explicit opt-in after the
+/// machine's system-wide Vulkan surface-path failure); non-Windows hosts
+/// keep the CROSS-OS-NORMALIZED Vulkan default. Measurement-only selector;
+/// no product code path is touched.
 fn normalized_backends() -> wgpu::Backends {
-    wgpu::Backends::VULKAN
+    match std::env::var("POCKET_GPU_BACKEND").as_deref() {
+        Ok("VULKAN") => wgpu::Backends::VULKAN,
+        #[cfg(windows)]
+        Ok("DX12") => wgpu::Backends::DX12,
+        #[cfg(windows)]
+        _ => wgpu::Backends::DX12,
+        #[cfg(not(windows))]
+        _ => wgpu::Backends::VULKAN,
+    }
+}
+
+fn backend_label() -> String {
+    format!("{:?}", normalized_backends())
 }
 
 impl ApplicationHandler<()> for App {
@@ -135,7 +156,9 @@ impl ApplicationHandler<()> for App {
             "target_id": target_id(),
             "logical_viewport": [720, 480],
             "force_scale": norm::forced_scale(),
-            "backend": "Vulkan",
+            "backend": backend_label(),
+            "pocket_gpu_backend_env":
+                std::env::var("POCKET_GPU_BACKEND").unwrap_or_else(|_| "unset".into()),
             "adapter": info.name,
             "adapter_backend": format!("{:?}", info.backend),
             "device_type": format!("{:?}", info.device_type),
