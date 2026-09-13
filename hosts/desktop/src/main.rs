@@ -1212,6 +1212,9 @@ fn main() -> Result<()> {
     // regardless of which phase lines the measurement flag lets print.
     norm::init();
     pocket3d::gpu::set_norm_mark(Some(norm::once));
+    // AUDIT-ONLY: route vendored wgpu-hal dx12 markers (E50a-h) onto the
+    // same E-series origin; silent unless NORMTRACE=1.
+    wgpu_hal::norm_hook::set_norm_mark(Some(norm::once));
     let _entry_anchor = proc_ms();
     norm::once("E00_MAIN_ENTRY");
     let args = parse_args()?;

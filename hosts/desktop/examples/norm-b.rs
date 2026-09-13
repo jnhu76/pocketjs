@@ -275,6 +275,8 @@ fn target_id() -> &'static str {
 
 fn main() {
     norm::init();
+    // AUDIT-ONLY: vendored wgpu-hal dx12 markers (E50a-h) on the same clock.
+    wgpu_hal::norm_hook::set_norm_mark(Some(norm::once));
     norm::once("E00_MAIN_ENTRY");
     norm::once("E10_EVENT_LOOP_BEGIN");
     let event_loop = EventLoop::builder().build().expect("event loop");

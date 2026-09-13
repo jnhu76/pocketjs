@@ -23,6 +23,10 @@ pocket-text = { path = "../../engine/crates/pocket-text" }
 pocket-ui-wgpu = { path = "../../engine/crates/pocket-ui-wgpu" }
 pocket3d = { path = "../../engine/pocket3d/crates/pocket3d", default-features = false }
 wgpu = "25"
+# AUDIT-ONLY (WINDOWS-STARTUP-CALLPATH-REALITY-AUDIT-1): direct dep so the
+# host can route the vendored wgpu-hal measurement hook onto the E-series
+# clock (see [patch.crates-io] below). Product behavior unchanged.
+wgpu-hal = "25"
 winit = "0.30"
 arboard = { version = "3", default-features = false }
 serde_json = "1"
@@ -54,3 +58,10 @@ raw-window-handle = "0.6"
 
 [profile.release]
 debug = false
+
+# AUDIT-ONLY (WINDOWS-STARTUP-CALLPATH-REALITY-AUDIT-1): vendored wgpu-hal
+# 25.0.2 + dx12 nested markers (E50a-h), env-gated via the norm hook, zero
+# effect unless the host installs the hook AND NORMTRACE=1. Never upstreamed;
+# remove the patch (and the wgpu-hal dep) to return to stock crates.io.
+[patch.crates-io]
+wgpu-hal = { path = "../../vendor/wgpu-hal" }
