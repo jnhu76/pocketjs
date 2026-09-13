@@ -460,14 +460,24 @@ fn run_runtime(
     inputs: Receiver<Input>,
     outputs: SyncSender<Output>,
     proxy: EventLoopProxy<Wake>,
-    gpu: Arc<pocket3d::gpu::Gpu>,
+    gpu_rx: std::sync::mpsc::Receiver<Arc<pocket3d::gpu::Gpu>>,
 ) -> Result<()> {
     let available = Arc::new(AtomicBool::new(true));
-    let mut renderer = gpu::Renderer::new(gpu);
-    memprobe::stage("runtime_renderer_ready");
+    // C1: guest boot does not need the GPU — it runs concurrently with the
+    // GPU path (instance is built on its own thread from process entry) and
+    // only the renderer build waits for the device handle. Measured
+    // trade-off (C1 evidence): letting guest ticks run before the renderer
+    // existed overlapped the first decode but destabilized the P95 tail
+    // (three-way startup contention), so ticks stay renderer-gated.
     let mut runtime = Runtime::boot(args)?;
     phase("runtime_boot_done");
     memprobe::stage("runtime_boot_done");
+    let gpu = gpu_rx
+        .recv()
+        .map_err(|_| anyhow!("GPU initialization failed; renderer cannot start"))?;
+    let mut renderer = gpu::Renderer::new(gpu);
+    phase("runtime_renderer_ready");
+    memprobe::stage("runtime_renderer_ready");
     let mut hash = None;
     let mut intents = Vec::new();
     let mut deadline = Instant::now();
@@ -543,6 +553,14 @@ struct RuntimeStartup {
     inputs: Receiver<Input>,
     outputs: SyncSender<Output>,
     proxy: EventLoopProxy<Wake>,
+    /// C1: the wgpu instance is created on a side thread from process entry
+    /// and lands here; `Presentation::new` consumes it after window creation.
+    instance_rx: std::sync::mpsc::Receiver<wgpu::Instance>,
+    /// C1: the runtime thread boots the guest while the GPU path finishes;
+    /// the finished device/queue handle is sent through here. Dropping the
+    /// sender (GPU failure path) releases the waiting runtime thread.
+    gpu_tx: std::sync::mpsc::Sender<Arc<pocket3d::gpu::Gpu>>,
+    gpu_rx: std::sync::mpsc::Receiver<Arc<pocket3d::gpu::Gpu>>,
 }
 struct Host {
     window: Option<Arc<Window>>,
@@ -763,30 +781,25 @@ impl ApplicationHandler<Wake> for Host {
         }
         window.set_ime_allowed(true);
         memprobe::stage("window_created");
-        let presentation = match gpu::Presentation::new(window.clone()) {
-            Ok(presentation) => presentation,
-            Err(error) => {
-                self.failure = Some(format!("GPU initialization: {error:#}"));
-                event_loop.exit();
-                return;
-            }
-        };
-        phase("gpu_ready");
-        memprobe::stage("gpu_ready");
-        let gpu = presentation.gpu.clone();
-        self.surface = Some(presentation);
+        // C1: the runtime thread spawns BEFORE the GPU path completes — its
+        // guest boot (QuickJS + bundle eval) runs concurrently with
+        // adapter/device/surface initialization, and only the renderer build
+        // waits for the device handle. Frame/present semantics are unchanged.
         let RuntimeStartup {
             args,
             inputs,
             outputs,
             proxy,
+            instance_rx,
+            gpu_tx,
+            gpu_rx,
         } = self.startup.take().expect("runtime startup");
         phase("runtime_thread_spawning");
         if let Err(error) = thread::Builder::new()
             .name("pocket-runtime".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_runtime(args, inputs, outputs, proxy.clone(), gpu)
+                    run_runtime(args, inputs, outputs, proxy.clone(), gpu_rx)
                 }))
                 .unwrap_or_else(|_| Err(anyhow!("Runtime worker panicked")));
                 let _ = proxy.send_event(Wake::Exit(result.err().map(|e| format!("{e:#}"))));
@@ -794,7 +807,32 @@ impl ApplicationHandler<Wake> for Host {
         {
             self.failure = Some(format!("Runtime startup: {error}"));
             event_loop.exit();
+            return;
         }
+        let instance = match instance_rx.recv() {
+            Ok(instance) => instance,
+            Err(_) => {
+                drop(gpu_tx);
+                self.failure = Some("GPU instance thread exited".into());
+                event_loop.exit();
+                return;
+            }
+        };
+        phase("gpu_instance");
+        memprobe::stage("gpu_instance");
+        let presentation = match gpu::Presentation::new(window.clone(), instance) {
+            Ok(presentation) => presentation,
+            Err(error) => {
+                drop(gpu_tx);
+                self.failure = Some(format!("GPU initialization: {error:#}"));
+                event_loop.exit();
+                return;
+            }
+        };
+        phase("gpu_ready");
+        memprobe::stage("gpu_ready");
+        let _ = gpu_tx.send(presentation.gpu.clone());
+        self.surface = Some(presentation);
         self.window = Some(window);
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Wake) {
@@ -1088,11 +1126,31 @@ fn main() -> Result<()> {
             })
             .collect();
     }
+    // C1: backend/ICD initialization is the largest single serial startup
+    // term (measured ~187 ms on the reference AMD Vulkan driver) and
+    // depends on nothing else — create the instance on a side thread from
+    // process entry so it overlaps event-loop/window creation and guest
+    // boot. Deterministic failure is preserved: an instance-thread spawn
+    // error aborts here; a send-side drop releases the runtime thread.
+    let (instance_tx, instance_rx) = std::sync::mpsc::channel();
+    let (gpu_tx, gpu_rx) = std::sync::mpsc::channel();
+    if let Err(error) = thread::Builder::new()
+        .name("pocket-gpu-instance".into())
+        .spawn(move || {
+            let instance = gpu::Presentation::create_instance();
+            let _ = instance_tx.send(instance);
+        })
+    {
+        return Err(anyhow!("GPU instance thread: {error}"));
+    }
     host.startup = Some(RuntimeStartup {
         args,
         inputs,
         outputs,
         proxy: event_loop.create_proxy(),
+        instance_rx,
+        gpu_tx,
+        gpu_rx,
     });
     event_loop.run_app(&mut host)?;
     if let Some(error) = host.failure {
