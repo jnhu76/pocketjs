@@ -772,11 +772,13 @@ impl ApplicationHandler<Wake> for Host {
                     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
                 );
                 let dpi = GetDpiForWindow(hwnd);
-                eprintln!(
-                    "A6EVENT,dpi-awareness,per_monitor_v2={},windowDpi={}",
-                    pmv2.as_bool(),
-                    dpi
-                );
+                if MEASUREMENT_TRACING.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "A6EVENT,dpi-awareness,per_monitor_v2={},windowDpi={}",
+                        pmv2.as_bool(),
+                        dpi
+                    );
+                }
             }
         }
         window.set_ime_allowed(true);
