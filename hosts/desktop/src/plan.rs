@@ -27,6 +27,9 @@ const BTN_SQUARE: u32 = 0x8000;
 // args
 // ---------------------------------------------------------------------------
 
+/// Scripted test-driver events (`--type/--click/--mouse/--key/--press`).
+/// Proof-harness machinery: compiled only for `bench-harness` builds.
+#[cfg(feature = "bench-harness")]
 #[derive(Clone)]
 enum ScriptEvent {
     /// Push typed characters at a tick (svc `ch` line).
@@ -244,10 +247,12 @@ struct Args {
     /// Set by a companion that opens this window itself.
     svc_connect: Option<String>,
     density: u32,
+    #[cfg(feature = "bench-harness")]
     script: Vec<ScriptEvent>,
     quit_after_ticks: Option<u64>,
     /// Benchmark typing storm: (chars/sec, start tick, duration ticks) —
     /// svc `ch` lines through the same edit path real typing takes.
+    #[cfg(feature = "bench-harness")]
     storm: Option<(u32, u64, u64)>,
     /// Print "READY <epoch_ms>" on the first painted frame — the desktop
     /// benchmark runner's cold-start marker (PR #294). Off by default.
@@ -257,6 +262,7 @@ struct Args {
     /// Run the A2 native image-resource proof harness (`--a2-harness`):
     /// native ≥4K pattern registration + bounded svc announcements +
     /// native retirement, on a fixed schedule. Test material only.
+    #[cfg(feature = "bench-harness")]
     a2_harness: bool,
     /// Run the A3 WIC-first JPEG proof harness (`--a3-harness`): the guest
     /// requests files by bounded svc intent; the host decodes them with
@@ -267,11 +273,13 @@ struct Args {
     /// Scripted real window resize: `--resize-at WxH@TICK` — once the
     /// runtime reaches `tick`, the window thread resizes the actual OS
     /// window so composition is proven through the real live-resize path.
+    #[cfg(feature = "bench-harness")]
     resize_at: Option<((u32, u32), u64)>,
     /// A6 scripted scale transitions: `--scale-at SCALE@TICK` (repeatable,
     /// applied in argument order). Drives the same apply_scale handler the
     /// real `ScaleFactorChanged` event uses: winit scale override, logical
     /// viewport re-asserted, raster density follows the scale.
+    #[cfg(feature = "bench-harness")]
     scale_at: Vec<(f64, u64)>,
 }
 
@@ -290,15 +298,20 @@ fn parse_args() -> Result<Args> {
         system: None,
         svc_connect: None,
         density: 2,
+        #[cfg(feature = "bench-harness")]
         script: Vec::new(),
         quit_after_ticks: None,
+        #[cfg(feature = "bench-harness")]
         storm: None,
         announce_ready: false,
         trace_frames: false,
+        #[cfg(feature = "bench-harness")]
         a2_harness: false,
         a3_harness: false,
         a3_files: Vec::new(),
+        #[cfg(feature = "bench-harness")]
         resize_at: None,
+        #[cfg(feature = "bench-harness")]
         scale_at: Vec::new(),
     };
     let mut system_plan_path = None;
@@ -333,6 +346,7 @@ fn parse_args() -> Result<Args> {
             }
             "--svc-connect" => args.svc_connect = Some(val("--svc-connect")?),
             "--density" => args.density = val("--density")?.parse::<u32>()?.clamp(1, 4),
+            #[cfg(feature = "bench-harness")]
             "--type" => {
                 // --type TEXT@TICK
                 let v = val("--type")?;
@@ -342,6 +356,7 @@ fn parse_args() -> Result<Args> {
                 args.script
                     .push(ScriptEvent::Type(t.parse()?, s.to_string()));
             }
+            #[cfg(feature = "bench-harness")]
             "--click" => {
                 // --click X,Y@TICK
                 let v = val("--click")?;
@@ -354,6 +369,7 @@ fn parse_args() -> Result<Args> {
                 args.script
                     .push(ScriptEvent::Click(t.parse()?, x.parse()?, y.parse()?));
             }
+            #[cfg(feature = "bench-harness")]
             "--mouse" => {
                 // --mouse X,Y[,d|u|r]@TICK — scripted pointer line (m = move,
                 // r = right press+release).
@@ -375,6 +391,7 @@ fn parse_args() -> Result<Args> {
                     kind,
                 ));
             }
+            #[cfg(feature = "bench-harness")]
             "--key" => {
                 // --key [cmd+][alt+][ctl+][sh+]NAME@TICK — scripted svc key line.
                 let v = val("--key")?;
@@ -411,6 +428,7 @@ fn parse_args() -> Result<Args> {
             "--quit-after" => args.quit_after_ticks = Some(val("--quit-after")?.parse()?),
             "--announce-ready" => args.announce_ready = true,
             "--trace-frames" => args.trace_frames = true,
+            #[cfg(feature = "bench-harness")]
             "--a2-harness" => args.a2_harness = true,
             "--a3-harness" => args.a3_harness = true,
             "--a3-file" => {
@@ -420,6 +438,7 @@ fn parse_args() -> Result<Args> {
                 }
                 args.a3_files.push(path);
             }
+            #[cfg(feature = "bench-harness")]
             "--resize-at" => {
                 // --resize-at W,H@TICK — real OS-window resize (logical size).
                 let v = val("--resize-at")?;
@@ -427,6 +446,7 @@ fn parse_args() -> Result<Args> {
                 let (w, h) = wh.split_once(',').ok_or_else(|| anyhow!("--resize-at W,H@TICK"))?;
                 args.resize_at = Some(((w.parse()?, h.parse()?), t.parse()?));
             }
+            #[cfg(feature = "bench-harness")]
             "--scale-at" => {
                 // --scale-at SCALE@TICK (repeatable) — A6 scale transition
                 // driven through the real ScaleFactorChanged handler.
@@ -439,6 +459,7 @@ fn parse_args() -> Result<Args> {
                 args.scale_at.push((scale, t.parse()?));
                 args.scale_at.sort_by_key(|(_, t)| *t);
             }
+            #[cfg(feature = "bench-harness")]
             "--press" => {
                 // --press NAME@TICK (console button script: up/down/left/
                 // right/cross/circle/square/triangle/l/r/start/select)
@@ -450,6 +471,7 @@ fn parse_args() -> Result<Args> {
                     button_for(name).ok_or_else(|| anyhow!("--press: unknown button {name}"))?;
                 args.script.push(ScriptEvent::Press(t.parse()?, bit));
             }
+            #[cfg(feature = "bench-harness")]
             "--storm" => {
                 // --storm CPS@START+DUR (ticks)
                 let v = val("--storm")?;
@@ -492,6 +514,7 @@ fn parse_args() -> Result<Args> {
         args.pak = None;
         args.system = Some(system);
     }
+    #[cfg(feature = "bench-harness")]
     if args.a2_harness && !args.companions.iter().any(|name| name == A2_SERVICE) {
         // The harness is the "companion" that feeds a2img lines over svc.
         args.companions.push(A2_SERVICE.to_string());

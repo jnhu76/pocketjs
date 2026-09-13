@@ -145,6 +145,7 @@ mod tests {
         assert!(plan.validate_for_host().is_ok());
     }
 
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a2_pattern_is_deterministic_and_diagnostic() {
         let same = a2_pattern(A2_W, A2_H, 0) == a2_pattern(A2_W, A2_H, 0);
@@ -167,6 +168,7 @@ mod tests {
         assert_eq!(at(12, 10), at(30, 10)); // the every-6px grid line columns
     }
 
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a2_harness_schedule_registers_announces_and_retires() {
         // Full state machine over a real UiSurface: bounded svc lines only,
@@ -186,6 +188,7 @@ mod tests {
         assert!(harness.tx_bytes < 4096, "announcements are bounded semantic fields");
     }
 
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a2_stale_handles_resolve_to_absence_end_to_end() {
         let surface = UiSurface::new((64.0, 64.0));
@@ -309,8 +312,10 @@ mod tests {
     ];
 
     /// The exact host-pushed svc lines (host → guest outbox mirror).
+    #[cfg(feature = "bench-harness")]
     fn a3_sent(harness: &A3Harness) -> Vec<Value> {
         harness
+            .audit
             .sent
             .iter()
             .map(|line| serde_json::from_str(line).expect("harness lines are JSON"))
@@ -324,6 +329,7 @@ mod tests {
         path
     }
 
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a3_manifest_is_pushed_once_and_is_bounded_semantic_state() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -340,9 +346,10 @@ mod tests {
         let surface = UiSurface::new((720.0, 480.0));
         let mut harness = A3Harness::new(false, vec![PathBuf::from("C:/a.jpg")]);
         harness.boot(&surface);
-        assert!(harness.sent.is_empty());
+        assert!(harness.audit.sent.is_empty());
     }
 
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a3_missing_file_pushes_bounded_error_and_harness_continues() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -372,7 +379,7 @@ mod tests {
         assert_eq!(lines[0]["code"], "cancelled");
         assert_eq!(lines[1]["req"], "r2");
         assert_eq!(lines[1]["code"], "missing");
-        assert_eq!(harness.failures, 2);
+        assert_eq!(harness.audit.failures, 2);
         assert_eq!(harness.successes, 0);
         let live = surface.with_ui(|ui| ui.texture_live_bytes());
         assert_eq!(live, 0, "no resource may exist for a failed request");
@@ -564,6 +571,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a4_source_transform_reports_closest_native_size() {
         // Exact native scale: requested 8x4 is exactly the 1/4 DCT scale.
@@ -643,6 +651,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a4_fit_request_decodes_scaled_and_announces_native_size() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -671,6 +680,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a4_full_request_on_oversized_source_degrades_explicitly() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -696,6 +706,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a3_open_request_decodes_registers_and_retires_previous_synchronously() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -740,17 +751,18 @@ mod tests {
         assert!(surface.with_ui(|ui| ui.texture(handle_1 as i32).is_none()));
         assert!(surface.with_ui(|ui| ui.texture(handle_2 as i32).is_some()));
         assert_eq!(harness.successes, 2);
-        assert_eq!(harness.failures, 0);
+        assert_eq!(harness.audit.failures, 0);
 
         // Every svc line on this path is bounded semantic state: no line
         // may approach pixel size (the plane itself is 2048 bytes, the
         // largest allowed line is the manifest — asserted far below it).
-        let total_tx = harness.tx_bytes;
+        let total_tx = harness.audit.tx_bytes;
         assert!(total_tx < 4096, "svc traffic must be bounded, got {total_tx}");
         std::fs::remove_file(&path).ok();
     }
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a5_rapid_requests_coalesce_and_only_the_newest_publishes() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -791,11 +803,12 @@ mod tests {
             "obsolete resources are already retired; exactly one plane lives"
         );
         // 120 requests produced bounded traffic, never pixel-sized lines.
-        assert!(harness.tx_bytes < 16 * 1024);
+        assert!(harness.audit.tx_bytes < 16 * 1024);
         std::fs::remove_file(&path).ok();
     }
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a5_interleaved_generations_publish_strictly_in_request_order() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -838,6 +851,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a5_hostile_batch_fails_bounded_and_recovers_without_crash() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -918,6 +932,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[cfg(feature = "bench-harness")]
     #[test]
     fn a5_cancellations_never_disturb_the_live_resource_or_boundary_budget() {
         let surface = UiSurface::new((720.0, 480.0));
@@ -936,7 +951,7 @@ mod tests {
 
         // A cancellation burst must leave the live resource untouched and
         // the boundary traffic bounded (no pixel-sized line, no churn).
-        let tx_before = harness.tx_bytes;
+        let tx_before = harness.audit.tx_bytes;
         for i in 0..50 {
             harness.observe_rx(
                 &surface,
@@ -949,8 +964,8 @@ mod tests {
         // Newest of the burst (c49) replaces r1; c0..c48 were cancelled.
         assert_eq!(surface.with_ui(|ui| ui.texture_live_bytes()), 16 * 8 * 4);
         assert_eq!(harness.successes, 2, "r1 + the newest of the burst only");
-        assert_eq!(harness.cancels, 49);
-        let per_request = (harness.tx_bytes - tx_before) / 50;
+        assert_eq!(harness.audit.cancels, 49);
+        let per_request = (harness.audit.tx_bytes - tx_before) / 50;
         assert!(per_request < 512, "cancel replies are bounded, got {per_request} B/req");
         std::fs::remove_file(&path).ok();
     }

@@ -28,10 +28,12 @@ use winit::{
     window::{CursorIcon, Window, WindowId},
 };
 mod gpu;
+mod memprobe;
 mod net;
 include!("plan.rs");
 include!("supervisor.rs");
 include!("buttons.rs");
+#[cfg(feature = "bench-harness")]
 include!("a2.rs");
 include!("a3.rs");
 
@@ -42,9 +44,18 @@ fn proc_ms() -> u128 {
     START.get_or_init(Instant::now).elapsed().as_millis()
 }
 
+/// Measurement stderr channels (A7EVENT startup phases, A6EVENT DPI/raster
+/// transitions): silent unless the run opted into measurement plumbing with
+/// `--announce-ready` — the flag that also arms the READY/IMGREADY markers,
+/// so every run that consumes these lines already passes it. Product
+/// operation prints none of them.
+static MEASUREMENT_TRACING: AtomicBool = AtomicBool::new(false);
+
 /// A7: one stderr line per startup phase (attribution evidence).
 fn phase(name: &str) {
-    eprintln!("A7EVENT,phase,{name},{}ms", proc_ms());
+    if MEASUREMENT_TRACING.load(Ordering::Relaxed) {
+        eprintln!("A7EVENT,phase,{name},{}ms", proc_ms());
+    }
 }
 
 fn text_worker(pak: Vec<u8>) -> OffloadWorker {
@@ -127,12 +138,16 @@ struct Runtime {
     scale: Option<f64>,
     ticks: u64,
     buttons: u32,
+    #[cfg(feature = "bench-harness")]
     script: Vec<ScriptEvent>,
+    #[cfg(feature = "bench-harness")]
     script_buttons: u32,
+    #[cfg(feature = "bench-harness")]
     script_mouse: bool,
     click_edge: bool,
     mouse_down: bool,
     wire: Option<net::SvcWire>,
+    #[cfg(feature = "bench-harness")]
     a2: A2Harness,
     a3: A3Harness,
     /// A7: successes already reported as `imgready` intents.
@@ -147,20 +162,25 @@ impl Runtime {
         }
         let pak = std::fs::read(resolve_asset(args.pak.clone(), &args.app, "pak")?)?;
         let source = std::fs::read_to_string(resolve_asset(args.js.clone(), &args.app, "js")?)?;
+        memprobe::stage("boot_assets_read");
         let surface = UiSurface::new_with_density(
             (args.viewport.0 as f32, args.viewport.1 as f32),
             args.density,
         );
+        memprobe::stage("boot_ui_surface");
         surface.set_identity(HOST_ID, HOST_ABI);
         surface.set_tick_rate(60);
         surface.set_svc_allowlist(args.companions.clone());
         surface.feed_pak(&pak);
         let supervisor = AppSupervisor::new(args.system.as_ref(), &surface)?;
+        memprobe::stage("boot_supervisor");
         let guest = Guest::new()?;
+        memprobe::stage("boot_quickjs");
         surface.mount(&guest)?;
         let offload = text_worker(pak);
         offload.mount(&guest)?;
         guest.eval(&args.app, &source)?;
+        memprobe::stage("boot_guest_eval");
         if !guest.has_frame() {
             return Err(anyhow!("bundle installed no frame handler"));
         }
@@ -177,12 +197,14 @@ impl Runtime {
             .svc_connect
             .clone()
             .map(|addr| net::SvcWire::spawn(addr, args.app.clone()));
+        #[cfg(feature = "bench-harness")]
         let a2_harness = args.a2_harness;
         let a3_harness_active = args.a3_harness;
         let a3_files = args.a3_files.clone();
         let mut runtime = Self {
             viewport: args.viewport,
             scale: None,
+            #[cfg(feature = "bench-harness")]
             script: args.script.clone(),
             args,
             surface,
@@ -191,11 +213,14 @@ impl Runtime {
             offload,
             ticks: 0,
             buttons: 0,
+            #[cfg(feature = "bench-harness")]
             script_buttons: 0,
+            #[cfg(feature = "bench-harness")]
             script_mouse: false,
             click_edge: false,
             mouse_down: false,
             wire,
+            #[cfg(feature = "bench-harness")]
             a2: A2Harness::new(a2_harness),
             a3: A3Harness::new(a3_harness_active, a3_files),
             seen_successes: 0,
@@ -254,10 +279,12 @@ impl Runtime {
                 // physical client pixels (no OS bitmap stretch).
                 self.scale = Some(s);
                 let density = effective_density(self.args.density, Some(s));
-                eprintln!(
-                    "A6EVENT,raster,density={density},scale={s},logical={}x{}",
-                    self.viewport.0, self.viewport.1
-                );
+                if MEASUREMENT_TRACING.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "A6EVENT,raster,density={density},scale={s},logical={}x{}",
+                        self.viewport.0, self.viewport.1
+                    );
+                }
                 self.svc(
                     json!({"t":"resize","w":self.viewport.0,"h":self.viewport.1,
                            "dpi":s*96.0,"density":density}),
@@ -273,8 +300,11 @@ impl Runtime {
                 self.surface.svc_push(line);
             }
         }
+        #[cfg(feature = "bench-harness")]
         self.a2.tick(self.ticks, &self.surface);
+        #[cfg(feature = "bench-harness")]
         self.run_script();
+        #[cfg(feature = "bench-harness")]
         if let Some((cps, start, dur)) = self.args.storm
             && self.ticks >= start
             && self.ticks < start + dur
@@ -286,6 +316,7 @@ impl Runtime {
             }
         }
         self.offload.begin_frame();
+        #[cfg(feature = "bench-harness")]
         let buttons = if self.args.editor {
             if self.mouse_down || self.script_mouse || self.click_edge {
                 BTN_CIRCLE
@@ -294,6 +325,16 @@ impl Runtime {
             }
         } else {
             self.buttons | self.script_buttons
+        };
+        #[cfg(not(feature = "bench-harness"))]
+        let buttons = if self.args.editor {
+            if self.mouse_down || self.click_edge {
+                BTN_CIRCLE
+            } else {
+                0
+            }
+        } else {
+            self.buttons
         };
         self.guest.frame(buttons)?;
         self.click_edge = false;
@@ -308,6 +349,7 @@ impl Runtime {
         }
         let mut intents = Vec::new();
         for line in self.surface.svc_drain() {
+            #[cfg(feature = "bench-harness")]
             if line.starts_with("{\"t\":\"a2") {
                 // A2 boundary traffic: counted and logged, never an intent.
                 self.a2.observe_rx(&line);
@@ -345,6 +387,7 @@ impl Runtime {
         // marker (T6 present-submitted, first useful image proxy).
         if self.a3.successes > self.seen_successes {
             self.seen_successes = self.a3.successes;
+            memprobe::stage("image_bound");
             intents.push(json!({"t": "imgready"}));
         }
         self.ticks += 1;
@@ -356,6 +399,7 @@ impl Runtime {
             ^ self.supervisor.visible_hash().rotate_left(17)
             ^ ((self.viewport.0 as u64) << 32 | self.viewport.1 as u64)
     }
+    #[cfg(feature = "bench-harness")]
     fn run_script(&mut self) {
         let tick = self.ticks;
         for ev in self.script.clone() {
@@ -420,8 +464,10 @@ fn run_runtime(
 ) -> Result<()> {
     let available = Arc::new(AtomicBool::new(true));
     let mut renderer = gpu::Renderer::new(gpu);
+    memprobe::stage("runtime_renderer_ready");
     let mut runtime = Runtime::boot(args)?;
     phase("runtime_boot_done");
+    memprobe::stage("runtime_boot_done");
     let mut hash = None;
     let mut intents = Vec::new();
     let mut deadline = Instant::now();
@@ -520,13 +566,15 @@ struct Host {
     image_pending: bool,
     image_announced: bool,
     trace_frames: bool,
+    #[cfg(feature = "bench-harness")]
     resize_at: Option<((u32, u32), u64)>,
+    #[cfg(feature = "bench-harness")]
     resize_done: bool,
-    /// A6 scripted scale transitions (harness order) + progress.
-    scale_at: Vec<(f64, u64)>,
     /// A6: the same schedule on the host wall clock (nominal 60 Hz ticks
     /// from process start), consumed by about_to_wait.
+    #[cfg(feature = "bench-harness")]
     scale_at_instant: Vec<(f64, u64, Instant)>,
+    #[cfg(feature = "bench-harness")]
     scale_done: usize,
     /// A6 driven scale; None until the first transition, after which it
     /// governs every logical↔physical conversion in this host.
@@ -565,10 +613,12 @@ impl Host {
             window.request_redraw();
         }
         let _ = self.tx.send(Input::Scale(scale));
-        eprintln!(
-            "A6EVENT,scale,{scale},logical={}x{},tick={tick}",
-            self.viewport.0, self.viewport.1
-        );
+        if MEASUREMENT_TRACING.load(Ordering::Relaxed) {
+            eprintln!(
+                "A6EVENT,scale,{scale},logical={}x{},tick={tick}",
+                self.viewport.0, self.viewport.1
+            );
+        }
     }
     fn send(&mut self, input: Input) {
         // Coalesce only motion; button and key edges retain FIFO order.
@@ -637,6 +687,7 @@ impl Host {
         trace_frame(self.trace_frames, "present-submit", *tick, start);
         if !self.ready {
             self.ready = true;
+            memprobe::stage("first_present");
             if self.announce_ready {
                 println!("READY {}", epoch_ms());
             }
@@ -710,6 +761,7 @@ impl ApplicationHandler<Wake> for Host {
             }
         }
         window.set_ime_allowed(true);
+        memprobe::stage("window_created");
         let presentation = match gpu::Presentation::new(window.clone()) {
             Ok(presentation) => presentation,
             Err(error) => {
@@ -719,6 +771,7 @@ impl ApplicationHandler<Wake> for Host {
             }
         };
         phase("gpu_ready");
+        memprobe::stage("gpu_ready");
         let gpu = presentation.gpu.clone();
         self.surface = Some(presentation);
         let RuntimeStartup {
@@ -810,6 +863,7 @@ impl ApplicationHandler<Wake> for Host {
                             window.request_redraw();
                         }
                     }
+                    #[cfg(feature = "bench-harness")]
                     if !self.resize_done
                         && let Some(((w, h), at)) = self.resize_at
                         && output.tick >= at
@@ -818,7 +872,9 @@ impl ApplicationHandler<Wake> for Host {
                         // Real OS-window resize: winit emits Resized, the
                         // normal live-viewport path takes over from there.
                         self.resize_done = true;
-                        eprintln!("A2EVENT,resize-window,{w},{h},atTick={at}");
+                        if MEASUREMENT_TRACING.load(Ordering::Relaxed) {
+                            eprintln!("A2EVENT,resize-window,{w},{h},atTick={at}");
+                        }
                         let _resized = window.request_inner_size(LogicalSize::new(w, h));
                     }
                     // A6 scale transitions are driven from about_to_wait on
@@ -833,6 +889,7 @@ impl ApplicationHandler<Wake> for Host {
         self.flush();
         // A6: drive due scale transitions on the host clock (see the
         // schedule note on Host::scale_at_instant).
+        #[cfg(feature = "bench-harness")]
         while self.scale_done < self.scale_at_instant.len()
             && self.scale_at_instant[self.scale_done].2 <= Instant::now()
         {
@@ -841,6 +898,7 @@ impl ApplicationHandler<Wake> for Host {
             self.apply_scale(scale, tick);
         }
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+        #[cfg(feature = "bench-harness")]
         if !self.pending.is_empty() {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(8),
@@ -851,6 +909,12 @@ impl ApplicationHandler<Wake> for Host {
             .filter(|(_, _, due)| *due > Instant::now())
         {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(*next));
+        }
+        #[cfg(not(feature = "bench-harness"))]
+        if !self.pending.is_empty() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(8),
+            ));
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -869,7 +933,7 @@ impl ApplicationHandler<Wake> for Host {
             WindowEvent::Resized(size) => {
                 let scale = self.current_scale();
                 let logical = logical_from_physical(size.width, size.height, scale);
-                if self.scale_driven {
+                if self.scale_driven && MEASUREMENT_TRACING.load(Ordering::Relaxed) {
                     eprintln!(
                         "A6EVENT,physical,{}x{},scale={scale},logical={}x{}",
                         size.width, size.height, logical.0, logical.1
@@ -961,10 +1025,13 @@ impl ApplicationHandler<Wake> for Host {
 }
 fn main() -> Result<()> {
     phase("main_entry");
+    memprobe::stage("process_entry");
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = parse_args()?;
+    MEASUREMENT_TRACING.store(args.announce_ready, Ordering::Relaxed);
     let event_loop = EventLoop::<Wake>::with_user_event().build()?;
     phase("event_loop_built");
+    memprobe::stage("event_loop_built");
     let (tx, inputs) = sync_channel(256);
     let (outputs, rx) = sync_channel(1);
     let mut host = Host {
@@ -988,28 +1055,34 @@ fn main() -> Result<()> {
         image_pending: false,
         image_announced: false,
         trace_frames: args.trace_frames,
+        #[cfg(feature = "bench-harness")]
         resize_at: args.resize_at,
+        #[cfg(feature = "bench-harness")]
         resize_done: false,
-        scale_at: args.scale_at.clone(),
+        #[cfg(feature = "bench-harness")]
         scale_at_instant: Vec::new(),
+        #[cfg(feature = "bench-harness")]
         scale_done: 0,
         scale_override: None,
         scale_driven: false,
         failure: None,
     };
     // A6: nominal 60 Hz tick schedule on the host wall clock.
-    let host_start = Instant::now();
-    host.scale_at_instant = args
-        .scale_at
-        .iter()
-        .map(|(scale, tick)| {
-            (
-                *scale,
-                *tick,
-                host_start + Duration::from_nanos(1_000_000_000 * *tick / 60),
-            )
-        })
-        .collect();
+    #[cfg(feature = "bench-harness")]
+    {
+        let host_start = Instant::now();
+        host.scale_at_instant = args
+            .scale_at
+            .iter()
+            .map(|(scale, tick)| {
+                (
+                    *scale,
+                    *tick,
+                    host_start + Duration::from_nanos(1_000_000_000 * *tick / 60),
+                )
+            })
+            .collect();
+    }
     host.startup = Some(RuntimeStartup {
         args,
         inputs,

@@ -187,13 +187,28 @@ pub struct Presentation {
 }
 impl Presentation {
     pub fn new(window: Arc<Window>) -> Result<Self> {
-        let instance = Gpu::new_instance();
+        // Host memory/backend policy (C2 evidence): the Windows product host
+        // names the Vulkan backend explicitly so backend modules it can
+        // never select are not loaded (multi-backend instance enumeration
+        // measured ~47 MiB private residency), and requests the allocator's
+        // MemoryUsage hint (default Performance block pre-allocation
+        // measured ~+135 MiB at first pipeline creation on the same driver).
+        // Portability seam stays in pocket3d: other hosts keep defaults.
+        #[cfg(windows)]
+        let (backends, hints) = (wgpu::Backends::VULKAN, wgpu::MemoryHints::MemoryUsage);
+        #[cfg(not(windows))]
+        let (backends, hints) = (wgpu::Backends::default(), wgpu::MemoryHints::default());
+        let instance = Gpu::new_instance_with_backends(backends);
+        crate::memprobe::stage("gpu_instance");
         let surface = instance.create_surface(window.clone())?;
-        let gpu = Arc::new(Gpu::from_instance_for_surface_with_power_preference(
+        crate::memprobe::stage("gpu_surface_created");
+        let gpu = Arc::new(Gpu::from_instance_for_surface_with_options(
             instance,
             &surface,
             wgpu::PowerPreference::LowPower,
+            hints,
         )?);
+        crate::memprobe::stage("gpu_adapter_device");
         let caps = surface.get_capabilities(&gpu.adapter);
         // Encoded byte-space color matches package colors and the portable
         // rasterizer. Avoid an additional sRGB conversion on final presentation.
@@ -216,6 +231,7 @@ impl Presentation {
             view_formats: vec![],
         };
         surface.configure(&gpu.device, &config);
+        crate::memprobe::stage("gpu_surface_configured");
         let info = gpu.adapter.get_info();
         log::info!(
             "Pocket UI GPU: {:?} / {} / {:?}",

@@ -18,6 +18,101 @@
 
 const A3_SERVICE: &str = "picoview-a3";
 
+/// Boundary-audit logging (A3SVC/A3EVENT/A3STAGES/A3BOUNDARY lines) is
+/// evidence machinery: compiled in only for `bench-harness` builds. The
+/// product path keeps the decode/register/retire semantics but not the
+/// audit chatter.
+#[cfg(feature = "bench-harness")]
+macro_rules! harness_log {
+    ($($arg:tt)*) => { eprintln!($($arg)*) };
+}
+#[cfg(not(feature = "bench-harness"))]
+macro_rules! harness_log {
+    ($($arg:tt)*) => {};
+}
+
+/// TEST_ONLY/EVIDENCE_ONLY audit state: boundary byte/line counters, event
+/// counters, and exact pushed-line retention for tests. Compiles to a
+/// zero-sized stub with no allocations in product builds.
+#[cfg(feature = "bench-harness")]
+struct A3Audit {
+    tx_lines: u64,
+    tx_bytes: u64,
+    rx_lines: u64,
+    rx_bytes: u64,
+    failures: u64,
+    cancels: u64,
+    decodes: u64,
+    sent: Vec<String>,
+}
+
+#[cfg(feature = "bench-harness")]
+impl A3Audit {
+    fn new() -> Self {
+        Self {
+            tx_lines: 0,
+            tx_bytes: 0,
+            rx_lines: 0,
+            rx_bytes: 0,
+            failures: 0,
+            cancels: 0,
+            decodes: 0,
+            sent: Vec::new(),
+        }
+    }
+    fn rx(&mut self, line: &str) {
+        self.rx_lines += 1;
+        self.rx_bytes += line.len() as u64 + 1;
+        harness_log!("A3SVC,rx,{},{}", line.len() + 1, line);
+    }
+    fn tx(&mut self, line: &str) {
+        self.sent.push(line.to_string());
+        self.tx_lines += 1;
+        self.tx_bytes += line.len() as u64 + 1; // + newline, per the batch contract
+        harness_log!("A3SVC,tx,{},{}", line.len() + 1, line);
+    }
+    fn count_failure(&mut self) {
+        self.failures += 1;
+    }
+    fn count_cancel(&mut self) {
+        self.cancels += 1;
+    }
+    fn count_decode(&mut self) {
+        self.decodes += 1;
+    }
+    fn boundary(&self, successes: u64, current_plane: usize) {
+        harness_log!(
+            "A3BOUNDARY,successes={},failures={},cancels={},decodes={},txLines={},txBytes={},rxLines={},rxBytes={},totalBytes={},currentPlane={}",
+            successes,
+            self.failures,
+            self.cancels,
+            self.decodes,
+            self.tx_lines,
+            self.tx_bytes,
+            self.rx_lines,
+            self.rx_bytes,
+            self.tx_bytes + self.rx_bytes,
+            current_plane
+        );
+    }
+}
+
+#[cfg(not(feature = "bench-harness"))]
+struct A3Audit;
+
+#[cfg(not(feature = "bench-harness"))]
+impl A3Audit {
+    fn new() -> Self {
+        Self
+    }
+    fn rx(&mut self, _line: &str) {}
+    fn tx(&mut self, _line: &str) {}
+    fn count_failure(&mut self) {}
+    fn count_cancel(&mut self) {}
+    fn count_decode(&mut self) {}
+    fn boundary(&self, _successes: u64, _current_plane: usize) {}
+}
+
 /// Monotonic microseconds since first use in this process (BENCHMARK §5
 /// requires a monotonic clock for latency instrumentation). Shares one
 /// origin with the FRAME_TRACE `wall` field, so A3 events and frame
@@ -102,6 +197,9 @@ struct A3Decoded {
 /// Result of probing the decoder's own source-transform scaling path
 /// (A4): `supported` reports whether the inbox decoder exposes it, and
 /// `native_*` the closest size it would actually produce (stored space).
+/// Evidence machinery (A4 characterization only — the decode path itself
+/// queries the transform inline); compiled only for `bench-harness`.
+#[cfg(feature = "bench-harness")]
 pub(crate) struct SourceTransformProbe {
     native_w: u32,
     native_h: u32,
@@ -137,7 +235,9 @@ fn checked_plane_bytes(w: u32, h: u32) -> Result<u64, A3DecodeError> {
 
 #[cfg(windows)]
 mod wic {
-    use super::{A3DecodeError, A3Decoded, PlaneTransform, QuarterTurn, ScaledDecode, SourceTransformProbe};
+    use super::{A3DecodeError, A3Decoded, PlaneTransform, QuarterTurn, ScaledDecode};
+    #[cfg(feature = "bench-harness")]
+    use super::SourceTransformProbe;
     use windows::core::Interface;
     use windows::Win32::Graphics::Imaging as w;
     use windows::Win32::System::Com::{
@@ -327,7 +427,9 @@ mod wic {
 
     /// A4: query the inbox decoder's own source-transform scaling path.
     /// `GetClosestSize` is in/out — desired size on input, closest
-    /// supported (native DCT) size on output.
+    /// supported (native DCT) size on output. Evidence machinery,
+    /// `bench-harness` builds only.
+    #[cfg(feature = "bench-harness")]
     pub(super) fn probe_source_transform(
         bytes: &[u8],
         want_w: u32,
@@ -519,7 +621,7 @@ fn decode_jpeg_wic_scaled(
     Err(A3DecodeError::DecoderUnavailable)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "bench-harness"))]
 fn probe_source_transform(
     bytes: &[u8],
     want_w: u32,
@@ -528,7 +630,7 @@ fn probe_source_transform(
     wic::probe_source_transform(bytes, want_w, want_h)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), feature = "bench-harness"))]
 fn probe_source_transform(
     _bytes: &[u8],
     _want_w: u32,
@@ -543,25 +645,17 @@ struct A3Harness {
     manifest_sent: bool,
     /// Current resource: (request id, generation-tagged handle, plane bytes).
     live: Option<(String, i32, usize)>,
-    tx_lines: u64,
-    tx_bytes: u64,
-    rx_lines: u64,
-    rx_bytes: u64,
+    /// Newly bound images not yet reported as `imgready` intents (A7).
     successes: u64,
-    failures: u64,
-    /// A5: requests superseded before any decode stage ran, and the
-    /// number of decode/publish cycles actually started.
-    cancels: u64,
-    decodes: u64,
+    /// TEST_ONLY/EVIDENCE_ONLY counters and retention; zero-sized in
+    /// product builds.
+    audit: A3Audit,
     /// A5: open requests accepted but not yet started. Draining coalesces
     /// this queue to its newest entry (PRD §17: current-image work
     /// in flight = 1) — superseded entries are cancelled before any
     /// decode/register/upload stage, so a stale generation can never
     /// publish over a newer one.
     queued: Vec<A3QueuedOpen>,
-    /// Exact host-pushed svc lines (bounded semantic state; mirrors the
-    /// guest outbox for tests and the boundary audit).
-    sent: Vec<String>,
 }
 
 struct A3QueuedOpen {
@@ -578,16 +672,9 @@ impl A3Harness {
             files,
             manifest_sent: false,
             live: None,
-            tx_lines: 0,
-            tx_bytes: 0,
-            rx_lines: 0,
-            rx_bytes: 0,
             successes: 0,
-            failures: 0,
-            cancels: 0,
-            decodes: 0,
+            audit: A3Audit::new(),
             queued: Vec::new(),
-            sent: Vec::new(),
         }
     }
 
@@ -608,9 +695,7 @@ impl A3Harness {
     /// Guest → host A3 traffic (open intents, acks): counted, logged, and
     /// (for open intents) answered — never forwarded as an app intent.
     fn observe_rx(&mut self, surface: &UiSurface, line: &str, tick: u64) {
-        self.rx_lines += 1;
-        self.rx_bytes += line.len() as u64 + 1;
-        eprintln!("A3SVC,rx,{},{line}", line.len() + 1);
+        self.audit.rx(line);
         if !self.active {
             return;
         }
@@ -651,7 +736,7 @@ impl A3Harness {
                 }
             }
             Some("a4ack") | Some("a3ack") => {
-                eprintln!(
+                harness_log!(
                     "A3EVENT,ack,req={},bound={},geom={},tick={tick},epochUs={}",
                     value["req"],
                     value["bound"].as_str().unwrap_or(""),
@@ -673,8 +758,9 @@ impl A3Harness {
         fit: Option<(u32, u32)>,
         tick: u64,
     ) {
+        #[cfg_attr(not(feature = "bench-harness"), allow(unused_variables))]
         let mode = if fit.is_some() { "fit" } else { "full" };
-        eprintln!(
+        harness_log!(
             "A3EVENT,open,req={req},path={},mode={mode},fit={},state=queued,tick={tick},epochUs={}",
             path.display(),
             fit.map_or(String::new(), |(w, h)| format!("{w}x{h}")),
@@ -695,8 +781,8 @@ impl A3Harness {
         }
         let drained = std::mem::take(&mut self.queued);
         for stale in &drained[..drained.len() - 1] {
-            self.cancels += 1;
-            eprintln!(
+            self.audit.count_cancel();
+            harness_log!(
                 "A3EVENT,cancel,req={},arrivedTick={},supersededBy={},tick={tick},epochUs={}",
                 stale.req,
                 stale.arrival_tick,
@@ -706,10 +792,14 @@ impl A3Harness {
             self.announce_error(surface, &stale.req, "cancelled", tick);
         }
         let newest = drained.last().expect("queue was non-empty");
-        self.decodes += 1;
+        self.audit.count_decode();
         self.handle_open(surface, &newest.req, newest.path.clone(), newest.arrival_tick, newest.fit);
     }
 
+    #[cfg_attr(
+        not(feature = "bench-harness"),
+        allow(unused_variables, unused_assignments, unused_mut)
+    )]
     fn handle_open(
         &mut self,
         surface: &UiSurface,
@@ -720,7 +810,7 @@ impl A3Harness {
     ) {
         let all = Instant::now();
         let mode = if fit.is_some() { "fit" } else { "full" };
-        eprintln!(
+        harness_log!(
             "A3EVENT,decode,req={req},mode={mode},tick={tick},epochUs={}",
             epoch_us()
         );
@@ -764,9 +854,11 @@ impl A3Harness {
         let plane = decoded.pixels.len();
         let (w, h, orientation) = (decoded.w, decoded.h, decoded.orientation);
         let stages = decoded.stages_us;
-        eprintln!(
+        harness_log!(
             "A3STAGES,req={req},containerFrameUs={},metadataUs={},pixelsUs={}",
-            stages[0], stages[1], stages[2]
+            stages[0],
+            stages[1],
+            stages[2]
         );
         let start = Instant::now();
         let (handle, live_bytes) = surface.with_ui(|ui| {
@@ -797,7 +889,7 @@ impl A3Harness {
         }
         self.live = Some((req.to_string(), handle, plane));
         self.successes += 1;
-        eprintln!(
+        harness_log!(
             "A3EVENT,img,req={req},handle={handle},w={w},h={h},orient={orientation},plane={plane},liveBytes={live_bytes},mode={mode},nativeW={native_w},nativeH={native_h},via={via},openUs={open_us},decodeUs={decode_us},registerUs={register_us},retiredReq={retired_req},totalUs={},tick={tick},epochUs={}",
             all.elapsed().as_micros(),
             epoch_us(),
@@ -812,10 +904,11 @@ impl A3Harness {
         self.boundary(plane);
     }
 
+    #[cfg_attr(not(feature = "bench-harness"), allow(unused_variables))]
     fn announce_error(&mut self, surface: &UiSurface, req: &str, code: &str, tick: u64) {
-        self.failures += 1;
+        self.audit.count_failure();
         let current_plane = self.live.as_ref().map_or(0, |(_, _, plane)| *plane);
-        eprintln!("A3EVENT,error,req={req},code={code},tick={tick},epochUs={}", epoch_us());
+        harness_log!("A3EVENT,error,req={req},code={code},tick={tick},epochUs={}", epoch_us());
         self.push(
             surface,
             &json!({"t": "a3error", "req": req, "code": code}).to_string(),
@@ -826,26 +919,11 @@ impl A3Harness {
     /// Cumulative guest-boundary accounting after every handled request:
     /// traffic is bounded per resource/event and independent of pixel size.
     fn boundary(&self, current_plane: usize) {
-        eprintln!(
-            "A3BOUNDARY,successes={},failures={},cancels={},decodes={},txLines={},txBytes={},rxLines={},rxBytes={},totalBytes={},currentPlane={}",
-            self.successes,
-            self.failures,
-            self.cancels,
-            self.decodes,
-            self.tx_lines,
-            self.tx_bytes,
-            self.rx_lines,
-            self.rx_bytes,
-            self.tx_bytes + self.rx_bytes,
-            current_plane
-        );
+        self.audit.boundary(self.successes, current_plane);
     }
 
     fn push(&mut self, surface: &UiSurface, line: &str) {
         surface.svc_push(line.to_string());
-        self.sent.push(line.to_string());
-        self.tx_lines += 1;
-        self.tx_bytes += line.len() as u64 + 1; // + newline, per the batch contract
-        eprintln!("A3SVC,tx,{},{line}", line.len() + 1);
+        self.audit.tx(line);
     }
 }

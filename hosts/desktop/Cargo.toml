@@ -5,6 +5,16 @@ edition = "2024"
 license = "MIT"
 description = "PocketJS portable Rust renderer and worker-owned desktop runtime"
 
+[features]
+# Proof/benchmark machinery (A2 pattern harness, input scripting, storm,
+# scripted resize/scale drivers, boundary-audit logging). Product builds
+# exclude it at compile time so the candidate never instantiates
+# TEST_ONLY/EVIDENCE_ONLY state; architecture evidence builds opt in with
+# `--features bench-harness`. Measurement plumbing with no resident state
+# (READY/IMGREADY markers, --trace-frames, POCKET_MEM_STAGE probe,
+# --quit-after) stays unconditional.
+bench-harness = []
+
 [dependencies]
 pocketjs-core = { path = "../../engine/core", features = ["std"] }
 pocket-mod = { path = "../../engine/crates/pocket-mod" }
@@ -31,6 +41,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_UI_HiDpi",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
 ] }
 # A6: names the raw-window-handle version already in the wgpu/winit tree;
 # used only to read the window HWND for the PMv2 awareness assertion.

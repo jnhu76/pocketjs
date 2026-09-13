@@ -49,13 +49,31 @@ impl Gpu {
         power_preference: wgpu::PowerPreference,
     ) -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        Self::from_instance_async(instance, compatible_surface, power_preference).await
+        Self::from_instance_async(
+            instance,
+            compatible_surface,
+            power_preference,
+            wgpu::MemoryHints::default(),
+        )
+        .await
     }
 
     /// Create the shared instance first when a surface must be created
     /// before adapter selection (windowed startup path).
     pub fn new_instance() -> wgpu::Instance {
         wgpu::Instance::new(&wgpu::InstanceDescriptor::default())
+    }
+
+    /// Same as [`Self::new_instance`], restricted to a backend set. Host
+    /// policy seam: a platform product host can name the backend family it
+    /// will actually select so backend modules it can never choose are
+    /// never loaded into the process. wgpu still fails with its own
+    /// deterministic "no compatible adapter" error when nothing matches.
+    pub fn new_instance_with_backends(backends: wgpu::Backends) -> wgpu::Instance {
+        wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends,
+            ..Default::default()
+        })
     }
 
     /// Finish initialization from an existing instance + surface.
@@ -77,10 +95,29 @@ impl Gpu {
         surface: &wgpu::Surface<'_>,
         power_preference: wgpu::PowerPreference,
     ) -> Result<Self> {
+        Self::from_instance_for_surface_with_options(
+            instance,
+            surface,
+            power_preference,
+            wgpu::MemoryHints::default(),
+        )
+    }
+
+    /// Finish initialization from an existing instance + surface with an
+    /// explicit allocator hint. Host memory-policy seam: wgpu's default
+    /// (`Performance`) block allocation is not free — see the host evidence
+    /// for the measured residency delta before choosing `MemoryUsage`.
+    pub fn from_instance_for_surface_with_options(
+        instance: wgpu::Instance,
+        surface: &wgpu::Surface<'_>,
+        power_preference: wgpu::PowerPreference,
+        memory_hints: wgpu::MemoryHints,
+    ) -> Result<Self> {
         pollster::block_on(Self::from_instance_async(
             instance,
             Some(surface),
             power_preference,
+            memory_hints,
         ))
     }
 
@@ -88,6 +125,7 @@ impl Gpu {
         instance: wgpu::Instance,
         compatible_surface: Option<&wgpu::Surface<'_>>,
         power_preference: wgpu::PowerPreference,
+        memory_hints: wgpu::MemoryHints,
     ) -> Result<Self> {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -109,7 +147,7 @@ impl Gpu {
                 label: Some("pocket3d"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
+                memory_hints,
                 trace: wgpu::Trace::Off,
             })
             .await
