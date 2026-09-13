@@ -81,10 +81,11 @@ pub fn guest_id() -> Option<String> {
     GUEST_ID.lock().unwrap().clone()
 }
 
-/// Emit the run's `BENCHMARK_CONFIG` line exactly once.
+/// Emit the run's `BENCHMARK_CONFIG` line exactly once (stderr, so a run's
+/// whole evidence stream lands in one captured file).
 pub fn emit_config(json: &str) {
     if !CONFIG_DONE.swap(true, Ordering::Relaxed) {
-        println!("BENCHMARK_CONFIG {json}");
+        eprintln!("BENCHMARK_CONFIG {json}");
     }
 }
 
