@@ -237,7 +237,11 @@ impl Runtime {
     /// Conservative by construction: the guest's static-frames declaration
     /// is required, native animations forbid parking, and harness
     /// schedules, pending text-offload replies, child instances, a network
-    /// svc wire, and the measurement quit path all keep the 60 Hz loop.
+    /// svc wire, and the probe quit path all keep the 60 Hz loop.
+    /// (`--trace-frames` is allowed to park: it is measurement-only, and
+    /// C4's input→present decomposition needs wake traces on the parked
+    /// path; A5-style cadence runs are still gated by `--quit-after` and
+    /// their script schedule.)
     fn can_suspend(&self) -> bool {
         if !self.surface.guest_static() || self.surface.animating() {
             return false;
@@ -257,7 +261,7 @@ impl Runtime {
         if !self.supervisor.instances.is_empty() {
             return false;
         }
-        if self.args.quit_after_ticks.is_some() || self.args.trace_frames {
+        if self.args.quit_after_ticks.is_some() {
             return false;
         }
         #[cfg(feature = "bench-harness")]
@@ -1098,6 +1102,14 @@ impl ApplicationHandler<Wake> for Host {
             WindowEvent::KeyboardInput { event, .. } => {
                 let name = Self::key_name(&event.logical_key);
                 let down = event.state == ElementState::Pressed;
+                // C4: the OS-event arrival stamp on the shared monotonic
+                // epoch clock — joins INPUT_TRACE against the tick /
+                // render-submit / present-submit FRAME_TRACE lines so the
+                // input→present chain decomposes into wake, work, and
+                // present terms. Trace-gated like every FRAME_TRACE line.
+                if down && self.trace_frames {
+                    eprintln!("INPUT_TRACE,key,{},{}", name, epoch_us());
+                }
                 let cmd = if cfg!(target_os = "macos") {
                     self.modifiers.super_key()
                 } else {
