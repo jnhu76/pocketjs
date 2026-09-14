@@ -162,6 +162,10 @@ impl ApplicationHandler<()> for App {
             "adapter": info.name,
             "adapter_backend": format!("{:?}", info.backend),
             "device_type": format!("{:?}", info.device_type),
+            // WINDOWS-STARTUP-ETW-REALITY-AUDIT-1: with NORMTRACE=1 the
+            // vendored wgpu-hal appends "+audit_luid=<h>-<l>" to the driver
+            // string so the selected adapter LUID is proven per run.
+            "driver": info.driver,
             "power_preference": "LowPower",
             "memory_hints": "MemoryUsage",
             "present_mode": "Fifo",

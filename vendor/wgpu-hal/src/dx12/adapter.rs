@@ -125,7 +125,10 @@ impl super::Adapter {
         // AUDIT-ONLY: name each exposed DXGI adapter (indexed) so the
         // probe-cost decomposition identifies its subject. Self-gated by
         // NORMTRACE; stderr, one line per adapter; no hook dependency.
-        {
+        // WINDOWS-STARTUP-ETW-REALITY-AUDIT-1: also carry the LUID text on
+        // the AdapterInfo driver string (audit_trace only) so the run's
+        // BENCHMARK_CONFIG proves WHICH LUID wgpu selected.
+        let (audit_trace, audit_luid) = {
             use std::sync::atomic::{AtomicBool, Ordering};
             static TRACE: AtomicBool = AtomicBool::new(false);
             static INIT: std::sync::Once = std::sync::Once::new();
@@ -135,13 +138,15 @@ impl super::Adapter {
                     Ordering::Relaxed,
                 );
             });
-            if TRACE.load(Ordering::Relaxed) {
-                let luid = &desc.AdapterLuid;
-                eprintln!(
-                    "AUDIT_DXGI_ADAPTER,idx={expose_idx},name={device_name},vid={:#x},pid={:#x},luid={:x}-{:x}",
-                    desc.VendorId, desc.DeviceId, luid.HighPart, luid.LowPart
-                );
-            }
+            let luid = &desc.AdapterLuid;
+            let text = format!("{:x}-{:x}", luid.HighPart, luid.LowPart);
+            (TRACE.load(Ordering::Relaxed), text)
+        };
+        if audit_trace {
+            eprintln!(
+                "AUDIT_DXGI_ADAPTER,idx={expose_idx},name={device_name},vid={:#x},pid={:#x},luid={audit_luid}",
+                desc.VendorId, desc.DeviceId
+            );
         }
 
         let mut features_architecture = Direct3D12::D3D12_FEATURE_DATA_ARCHITECTURE::default();
@@ -173,17 +178,24 @@ impl super::Adapter {
                 wgt::DeviceType::DiscreteGpu
             },
             driver: {
-                if let Ok(i) = unsafe { adapter.CheckInterfaceSupport(&Dxgi::IDXGIDevice::IID) } {
-                    const MASK: i64 = 0xFFFF;
-                    format!(
-                        "{}.{}.{}.{}",
-                        i >> 48,
-                        (i >> 32) & MASK,
-                        (i >> 16) & MASK,
-                        i & MASK
-                    )
+                let base: String = {
+                    if let Ok(i) = unsafe { adapter.CheckInterfaceSupport(&Dxgi::IDXGIDevice::IID) } {
+                        const MASK: i64 = 0xFFFF;
+                        format!(
+                            "{}.{}.{}.{}",
+                            i >> 48,
+                            (i >> 32) & MASK,
+                            (i >> 16) & MASK,
+                            i & MASK
+                        )
+                    } else {
+                        String::new()
+                    }
+                };
+                if audit_trace {
+                    format!("{base} +audit_luid={audit_luid}")
                 } else {
-                    String::new()
+                    base
                 }
             },
             driver_info: String::new(),

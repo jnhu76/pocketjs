@@ -145,9 +145,31 @@ impl crate::Instance for super::Instance {
         crate::norm_hook::norm_mark("E50b_DXGI_ENUM_END");
 
         crate::norm_hook::norm_mark("E50c_ADAPTER_EXPOSE_BEGIN");
+        // AUDIT-ONLY (WINDOWS-STARTUP-ETW-REALITY-AUDIT-1): exact-LUID
+        // causal experiment. When ETW_AUDIT_SKIP_LUID equals the LUID text
+        // ("<high>-<low>", same format as AUDIT_DXGI_ADAPTER) of one
+        // enumerated adapter, exactly that adapter is not exposed — no
+        // D3D12CreateDevice probe, no candidate. Env-gated, default off =
+        // pristine behavior. Measurement-only; never upstreamed.
+        let audit_skip_luid = std::env::var("ETW_AUDIT_SKIP_LUID").ok();
         let exposed = adapters
             .into_iter()
             .filter_map(|raw| {
+                if let Some(skip) = &audit_skip_luid {
+                    if let Ok(desc) = unsafe { raw.GetDesc2() } {
+                        let luid = &desc.AdapterLuid;
+                        let text = format!("{:x}-{:x}", luid.HighPart, luid.LowPart);
+                        if &text == skip {
+                            if matches!(std::env::var("NORMTRACE").as_deref(), Ok("1")) {
+                                eprintln!(
+                                    "AUDIT_DXGI_SKIPPED,luid={text},vid={:#x},pid={:#x}",
+                                    desc.VendorId, desc.DeviceId
+                                );
+                            }
+                            return None;
+                        }
+                    }
+                }
                 super::Adapter::expose(raw, &self.library, self.flags, self.dxc_container.clone())
             })
             .collect();
