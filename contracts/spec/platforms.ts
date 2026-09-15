@@ -339,8 +339,9 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
       "text.glyphs.runtime",
     ],
   },
-  // Portable desktop host: winit presentation, Rust software rendering and
-  // AppSupervisor on a runtime worker, text in independent offload workers.
+  // Portable desktop host: winit window/input, shared pocket-ui-wgpu
+  // rendering/presentation, AppSupervisor on a runtime worker, and text in
+  // independent offload workers.
   "macos-app": {
     hostAbi: 4,
     platform: "macos",
