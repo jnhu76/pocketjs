@@ -3966,6 +3966,24 @@ fn native_texture_registration_admission_pixels_and_flags() {
     ui.free_texture(handle);
     assert!(ui.texture(handle).is_none());
     assert_eq!(ui.texture_live_bytes(), before);
+
+    // LIFO slot reuse re-arms a fresh generation tag: re-registering takes
+    // the freed slot back under a different handle, live through the same
+    // sampling path, while the stale handle stays dead.
+    let again = ui.register_native_texture(&pixels, w, h, spec::psm::PSM_8888, false);
+    assert!(again >= 0);
+    assert_ne!(again, handle);
+    assert!(ui.texture(again).is_some());
+    assert_eq!(ui.texture_live_bytes() - before, (w * h * 4) as usize);
+    ui.free_texture(again);
+
+    // The 16bpp admission branch (bpp = 2) and its byte_len accounting.
+    let px565 = [0x1f, 0x78]; // one PSM_5650 pixel
+    let h565 = ui.register_native_texture(&px565, 1, 1, spec::psm::PSM_5650, false);
+    assert!(h565 >= 0);
+    assert_eq!(ui.texture_live_bytes() - before, 2);
+    ui.free_texture(h565);
+    assert_eq!(ui.texture_live_bytes(), before);
 }
 
 #[test]

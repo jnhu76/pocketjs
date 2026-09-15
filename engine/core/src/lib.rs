@@ -733,8 +733,11 @@ impl Ui {
     /// the large-image seam beside the JS-facing `upload_texture`
     /// small-texture contract, which keeps its own pow2 <= spec::TEX_MAX_DIM
     /// rule untouched. Dimensions must be 1..=NATIVE_TEX_MAX_DIM per axis
-    /// (8192: the wgpu-default `max_texture_dimension_2d` class; individual
-    /// backends may still reject beyond their own device limits).
+    /// (8192: the wgpu-default `max_texture_dimension_2d` class). wgpu-class
+    /// backends reject beyond their own device limits; fixed-function
+    /// GE-class backends additionally require pow2 dimensions and stride,
+    /// so this is a desktop-class admission rule — a host bound to such a
+    /// backend must not register non-pow2 resources through it.
     /// PSM_5650/4444/8888 only — photo-class formats, no CLUT. `pixels` are
     /// the native producer's bytes, copied into aligned core storage;
     /// nothing transits a guest heap. Returns the generation-tagged handle,
