@@ -3923,3 +3923,70 @@ fn font_revision_changes_only_after_successful_load_and_is_slot_local() {
     assert_eq!(ui.font_atlas_revision(0), 0);
     assert_eq!(ui.font_atlas_revision(255), 0);
 }
+
+#[test]
+fn native_texture_registration_admission_pixels_and_flags() {
+    let mut ui = Ui::new();
+    // Non-pow2, >TEX_MAX_DIM dimensions are the seam's reason to exist.
+    let (w, h) = (1024u32, 600u32);
+    let mut pixels: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.extend_from_slice(&[(x % 251) as u8, (y % 253) as u8, 7, 255]);
+        }
+    }
+    let before = ui.texture_live_bytes();
+    let handle = ui.register_native_texture(&pixels, w, h, spec::psm::PSM_8888, true);
+    assert!(handle >= 0);
+    let view = ui.texture(handle).expect("native texture is live");
+    assert_eq!(view.w, w);
+    assert_eq!(view.h, h);
+    assert_eq!(view.psm, spec::psm::PSM_8888);
+    assert!(view.linear);
+    assert_eq!(view.pixels, &pixels[..]);
+    assert_eq!(ui.texture_live_bytes() - before, (w * h * 4) as usize);
+
+    // Malformed admissions: empty, over-cap, truncated, unknown psm, T8.
+    assert_eq!(ui.register_native_texture(&pixels, 0, h, spec::psm::PSM_8888, false), -1);
+    assert_eq!(ui.register_native_texture(&pixels, w, 0, spec::psm::PSM_8888, false), -1);
+    assert_eq!(
+        ui.register_native_texture(&pixels, crate::NATIVE_TEX_MAX_DIM + 1, 1, spec::psm::PSM_8888, false),
+        -1
+    );
+    assert_eq!(
+        ui.register_native_texture(&pixels[..(w * h * 4 - 1) as usize], w, h, spec::psm::PSM_8888, false),
+        -1
+    );
+    assert_eq!(ui.register_native_texture(&pixels, 16, 16, 99, false), -1);
+    assert_eq!(ui.register_native_texture(&pixels, 16, 16, spec::psm::PSM_T8, false), -1);
+    assert_eq!(ui.texture_live_bytes() - before, (w * h * 4) as usize);
+
+    // free_texture drops the bytes synchronously; the stale handle draws
+    // nothing through the same sampling path backends use.
+    ui.free_texture(handle);
+    assert!(ui.texture(handle).is_none());
+    assert_eq!(ui.texture_live_bytes(), before);
+}
+
+#[test]
+fn native_texture_boundaries_and_js_contract_untouched() {
+    let mut ui = Ui::new();
+    // 8192 per axis is admitted (one row of it — no megapixel test payloads).
+    let row = vec![0u8; (crate::NATIVE_TEX_MAX_DIM * 4) as usize];
+    let h1 = ui.register_native_texture(&row, crate::NATIVE_TEX_MAX_DIM, 1, spec::psm::PSM_8888, false);
+    assert!(h1 >= 0);
+    // The JS-facing small-texture contract keeps its own pow2 <= TEX_MAX_DIM
+    // rule: these were -1 before the seam and must stay -1.
+    assert_eq!(ui.upload_texture(&row, crate::NATIVE_TEX_MAX_DIM, 1, spec::psm::PSM_8888), -1);
+    assert_eq!(ui.upload_texture(&vec![0u8; 16 * 16 * 4], 1024, 16, spec::psm::PSM_8888), -1);
+    assert_eq!(ui.upload_texture(&vec![0u8; 17 * 16 * 4], 17, 16, spec::psm::PSM_8888), -1);
+    // Native registrations are visible through the same slot walk GPU caches
+    // sweep (texture_at_versioned), with the real registered dimensions.
+    let seen: Vec<_> = (0..ui.texture_slot_count())
+        .filter_map(|s| ui.texture_at_versioned(s as u32))
+        .collect();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, h1);
+    assert_eq!(seen[0].2.w, crate::NATIVE_TEX_MAX_DIM);
+    assert_eq!(seen[0].2.h, 1);
+}

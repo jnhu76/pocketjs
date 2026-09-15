@@ -358,3 +358,57 @@ fn gpu_drawlist_composition_and_resource_lifecycle() {
     );
     close(&pixels, &[64, 96, 128, 255].repeat(256), 1);
 }
+
+#[test]
+fn gpu_renders_native_registered_non_pow2_texture() {
+    // Native registration is the host-side large-image seam: dimensions past
+    // the JS-facing pow2 <= TEX_MAX_DIM contract must sample identically on
+    // the GPU path and the software raster reference — no envelope, no
+    // downsample, no pow2 padding between registration and display.
+    let gpu = Gpu::new_headless().expect("GPU required for DrawList conformance");
+    eprintln!("native seam render: {:?}", gpu.adapter.get_info());
+    let (w, h) = (520u32, 4u32); // >TEX_MAX_DIM and non-pow2 on x
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for i in 0..(w * h) {
+        let x = (i % w) as u32;
+        px.extend_from_slice(&[x as u8, 0, (255 - x.min(255)) as u8, 255]);
+    }
+    let mut ui = Ui::new();
+    ui.set_viewport(w as f32, h as f32);
+    // The JS-facing small-texture contract still rejects these dimensions.
+    assert_eq!(ui.upload_texture(&px, w, h, spec::psm::PSM_8888), -1);
+    let handle = ui.register_native_texture(&px, w, h, spec::psm::PSM_8888, false);
+    assert!(handle >= 0);
+    let words = image(handle, 0, 0, w as u16, h as u16);
+
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("native seam fixture"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let out = OffscreenTarget {
+        texture,
+        view,
+        size: (w, h),
+    };
+    let mut renderer = UiRenderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm);
+    let mut expected = vec![0u8; (w * h * 4) as usize];
+    raster::render_scaled(&ui, &words, &mut expected, 1);
+    close(
+        &draw(&gpu, &mut renderer, &ui, &words, &out, 1),
+        &expected,
+        1,
+    );
+}
