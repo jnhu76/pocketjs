@@ -155,9 +155,8 @@ jobs:
           cargo fmt --check --manifest-path hosts/desktop/Cargo.toml
           cargo clippy --locked --manifest-path hosts/desktop/Cargo.toml -- -D warnings
           cargo test --locked --manifest-path hosts/desktop/Cargo.toml
+          cargo test --locked --manifest-path hosts/desktop/Cargo.toml -- --ignored
           cargo test --locked --manifest-path engine/Cargo.toml -p pocket-ui-surface
-          # hosts/desktop presents through the shared pocket-ui-wgpu renderer.
-          cargo test --locked --manifest-path engine/Cargo.toml -p pocket-ui-wgpu
           cargo test --locked --manifest-path engine/crates/pocket-text/Cargo.toml
 
       - name: Build windows-app release host
