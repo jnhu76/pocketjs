@@ -150,7 +150,9 @@ target triple and supplies I/O, a JS engine, and a backend. `hosts/psp` embeds
 QuickJS and renders through `sceGu`; `engine/wasm` wraps the identical core
 with the software rasterizer in one `wasm32-unknown-unknown` cdylib that serves
 both the browser dev host and the headless Bun goldens; `hosts/desktop` drives
-gpui behind the `macos-app` and `linux-app` targets. Native hosts consume the
+winit windows/input with the shared `pocket-ui-wgpu` DrawList backend (wgpu on
+every desktop OS — see docs/BACKENDS.md for the backend matrix and the image
+resource representations). Native hosts consume the
 same stable `HostBuildInputs` projection.
 
 ### Native animation on a fixed core clock

@@ -68,13 +68,32 @@ const DEFAULT_TICK_HZ: u32 = 60;
 /// durations, and no display drives faster anyway.
 pub const MAX_TICK_HZ: u32 = 240;
 
-/// One uploaded texture. Pixels are copied into 16-byte-aligned storage so
-/// the PSP GE can sample them directly (the wasm rasterizer reads them via
-/// `Ui::texture`).
+/// Largest per-side dimension `Ui::upload_owned_rgba8` admits. Matches the
+/// wgpu default `maxTextureDimension2d`; every in-tree Desktop host requests
+/// wgpu's default limits, so anything within this bound is creatable by the
+/// shared Desktop backend. Byte-reading backends have no creation-time
+/// dimension envelope at all.
+pub const NATIVE_TEX_MAX_DIM: u32 = 8192;
+
+/// Physical pixel backing of one texture record. Both representations expose
+/// the same bytes through `Texture::pixels`/`TexView`; they differ in
+/// allocation and alignment only.
+enum TexBacking {
+    /// 16-byte-aligned store (`copy_aligned` into `u128` chunks) — what the
+    /// PSP GE samples in place. Every pak/upload-contract texture lives
+    /// here, and PSM_T8 in-place updates require it.
+    Aligned { data: Vec<u128>, byte_len: usize },
+    /// Tight RGBA8 plane moved in from a host decoder
+    /// (`Ui::upload_owned_rgba8`). Byte-aligned only; consumers read it as
+    /// bytes (`Texture::pixels`), never as aligned lanes.
+    Owned { data: Vec<u8> },
+}
+
+/// One uploaded texture. Pixel bytes live in one of two physical
+/// representations (`TexBacking`); logical identity — handle, dimensions,
+/// format tag, revision — is representation-independent.
 pub struct Texture {
-    /// 16-byte-aligned backing store (`u128` chunks).
-    data: Vec<u128>,
-    byte_len: usize,
+    backing: TexBacking,
     pub w: u32,
     pub h: u32,
     /// spec::psm::* pixel format.
@@ -96,8 +115,13 @@ pub struct Texture {
 
 impl Texture {
     pub fn pixels(&self) -> &[u8] {
-        // Safe: the Vec<u128> owns at least byte_len initialized bytes.
-        unsafe { core::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.byte_len) }
+        match &self.backing {
+            // Safe: the Vec<u128> owns at least byte_len initialized bytes.
+            TexBacking::Aligned { data, byte_len } => unsafe {
+                core::slice::from_raw_parts(data.as_ptr() as *const u8, *byte_len)
+            },
+            TexBacking::Owned { data } => data,
+        }
     }
 
     /// The 1024-byte CLUT (256 x u32 ABGR); Some only when psm == PSM_T8.
@@ -122,7 +146,12 @@ impl Texture {
 }
 
 /// Borrowed view of one live texture (what backends sample — see
-/// `Ui::texture` / `Ui::texture_at`). All byte slices are 16-byte aligned.
+/// `Ui::texture` / `Ui::texture_at`). Alignment is per representation: bytes
+/// of an aligned PSM store (`TexBacking::Aligned`) are 16-byte aligned —
+/// the PSP GE samples that pointer directly — while an owned RGBA8 plane
+/// (`Ui::upload_owned_rgba8`) is byte-aligned only and must be read as
+/// bytes; backends that sample through graphics hardware must stage an
+/// aligned copy themselves before pointing hardware at it.
 #[derive(Clone, Copy)]
 pub struct TexView<'a> {
     pub pixels: &'a [u8],
@@ -693,8 +722,7 @@ impl Ui {
             copy_aligned(stream, byte_len)
         };
         let tex = Texture {
-            data: chunks,
-            byte_len,
+            backing: TexBacking::Aligned { data: chunks, byte_len },
             w,
             h,
             psm,
@@ -753,6 +781,48 @@ impl Ui {
         )
     }
 
+    /// Admit a host-decoded image as one texture. `pixels` is tight RGBA8
+    /// (RGBA byte order, rows of `w * 4` bytes, `pixels.len() == w * h * 4`)
+    /// and MOVES into the record — there is no intermediate aligned-store
+    /// copy, so admission costs no CPU-to-CPU plane copy. The record carries
+    /// the `PSM_8888` tag under the same generation-tagged handles, content
+    /// revisions, and free semantics as pak textures. Dimensions need not be
+    /// powers of two (the pow-2 rule is the GE's upload-contract constraint,
+    /// not this path's); each side is capped at `NATIVE_TEX_MAX_DIM`.
+    /// Returns the handle, or -1 (with `pixels` dropped) for zero or
+    /// oversized dimensions or a byte-count mismatch.
+    ///
+    /// Backends that read `TexView::pixels` as bytes — the software
+    /// rasterizer, rgb565, gpui, the pocket-ui-wgpu uploader — consume the
+    /// plane unchanged. A backend that samples the aligned PSM store through
+    /// graphics hardware (the PSP GE) must stage an aligned copy inside the
+    /// device backend on demand before drawing it; no device host uploads
+    /// decoded images today.
+    pub fn upload_owned_rgba8(&mut self, pixels: Vec<u8>, w: u32, h: u32, linear: bool) -> i32 {
+        if w == 0 || h == 0 || w > NATIVE_TEX_MAX_DIM || h > NATIVE_TEX_MAX_DIM {
+            return -1;
+        }
+        // w, h <= NATIVE_TEX_MAX_DIM bounds w * h * 4 at 2^28 bytes — no
+        // usize overflow on any target this crate builds for.
+        if pixels.len() != w as usize * h as usize * 4 {
+            return -1;
+        }
+        let tex = Texture {
+            backing: TexBacking::Owned { data: pixels },
+            w,
+            h,
+            psm: spec::psm::PSM_8888,
+            palette: None,
+            linear,
+            revision: 0,
+        };
+        let handle = tex_alloc(&mut self.textures, &mut self.tex_free, tex);
+        if handle >= 0 {
+            self.bump_raster_revision();
+        }
+        handle
+    }
+
     /// Overwrite a live PSM_T8 texture's palette + pixels IN PLACE (the video
     /// plane's per-frame path: one texture for the whole session, so image
     /// bindings and the GE's texture pointer stay stable while the bytes
@@ -772,12 +842,17 @@ impl Ui {
         if tex.psm != spec::psm::PSM_T8 || palette.len() != TEX_PALETTE_BYTES {
             return false;
         }
-        if pixels.len() != tex.byte_len {
-            return false;
-        }
         let Some(pal) = tex.palette.as_mut() else {
             return false;
         };
+        // PSM_T8 records always live in the aligned store (only
+        // upload_texture_flags/upload_tileset_tile create them).
+        let TexBacking::Aligned { data, byte_len } = &mut tex.backing else {
+            return false;
+        };
+        if pixels.len() != *byte_len {
+            return false;
+        }
         unsafe {
             core::ptr::copy_nonoverlapping(
                 palette.as_ptr(),
@@ -786,8 +861,8 @@ impl Ui {
             );
             core::ptr::copy_nonoverlapping(
                 pixels.as_ptr(),
-                tex.data.as_mut_ptr() as *mut u8,
-                tex.byte_len,
+                data.as_mut_ptr() as *mut u8,
+                *byte_len,
             );
         }
         tex.revision = tex.revision.wrapping_add(1);
@@ -1710,8 +1785,9 @@ impl Ui {
     }
 
     /// Pixels + metadata of a live texture (backends sample through this;
-    /// byte slices are 16-byte aligned). Stale/freed handles resolve to None
-    /// — a freed texture "draws nothing" through exactly this path.
+    /// see `TexView` for the per-representation alignment contract).
+    /// Stale/freed handles resolve to None — a freed texture "draws nothing"
+    /// through exactly this path.
     pub fn texture(&self, handle: i32) -> Option<TexView<'_>> {
         let slot = tex_resolve(&self.textures, handle)?;
         self.textures[slot as usize].tex.as_ref().map(Texture::view)

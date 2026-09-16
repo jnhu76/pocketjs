@@ -29,6 +29,48 @@ hosts, the PSP GE walker, the ESP32-P4 PPA and Symbian GLES2 ports.
   runtime (system-font rasterization + `loadFontAtlas` reload, note-widget's
   cjk.rs) add `text.glyphs.runtime`.
 
+### Image resources: one logical record, two physical representations
+
+The core owns logical image identity; a backend owns the physical
+representation. A texture is one record in the core's slot table — a
+generation-tagged handle, dimensions, a pixel-format tag, a content
+revision, and the pixel bytes. Backends sample through `Ui::texture` /
+`Ui::texture_at_versioned` (`TexView`); **there is one texture-handle
+namespace**, and **`wgpu::Texture` is not the application-visible identity**
+of an image.
+
+The record's pixel bytes have two physical representations:
+
+- **The aligned PSM store** (`copy_aligned` into 16-byte-aligned `u128`
+  chunks) backs every pak/upload-contract texture (PSM 5650/4444/8888/T8,
+  power-of-two dimensions per the JS contract). The PSP GE samples this
+  store in place, which is what the alignment is for.
+- **An owned RGBA8 plane** (`Ui::upload_owned_rgba8`) backs host-decoded
+  images: the caller's tight RGBA8 `Vec<u8>` — rows of `width * 4` bytes,
+  dimensions up to `NATIVE_TEX_MAX_DIM` (8192, the wgpu default
+  `maxTextureDimension2d`) — moves into the record with no intermediate
+  copy. The record carries the `PSM_8888` tag (RGBA byte order) under the
+  same handles, revisions, and free semantics as pak textures.
+
+**PSM is not the canonical Desktop representation.** On the Desktop family
+(`hosts/desktop` → `pocket-ui-wgpu` → wgpu), `pocket-ui-wgpu` owns GPU
+residency: `sync_textures` uploads a `PSM_8888` view's bytes with
+`Queue::write_texture` borrowing the record's plane — `write_texture`
+accepts `bytes_per_row` values that are not multiples of 256, so the
+repository allocates no staging or conversion plane (the queue's own staged
+write is the transfer mechanism) — and expands 5650/4444/T8 to RGBA8 once
+per content revision. A decoded RGBA8 image therefore costs one CPU plane
+(the admitted source) plus the GPU texture: no aligned-store round-trip, no
+second full RGBA8 expansion before upload.
+
+Byte-reading consumers — the core software rasterizer, the rgb565 backend,
+the gpui backend — read `TexView::pixels` identically under either
+representation. Device backends that sample the aligned store through
+graphics hardware (the PSP GE) never receive an owned plane: their hosts
+upload through the pak contract. A device host that later needs
+decoded-image admission must stage an aligned copy inside the device
+backend on demand, not keep a permanent duplicate plane in the core.
+
 ## The portable desktop host
 
 `hosts/desktop` uses winit for windows/input and the existing `pocket-ui-wgpu`

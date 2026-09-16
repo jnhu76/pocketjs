@@ -520,8 +520,10 @@ fn disc_texture(
         textures,
         tex_free,
         crate::Texture {
-            data: chunks,
-            byte_len,
+            backing: crate::TexBacking::Aligned {
+                data: chunks,
+                byte_len,
+            },
             w: dim,
             h: dim,
             psm: spec::psm::PSM_8888,

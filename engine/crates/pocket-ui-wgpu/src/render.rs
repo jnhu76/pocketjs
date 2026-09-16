@@ -831,10 +831,26 @@ impl UiRenderer {
                     ) {
                         continue;
                     }
-                    self.images[slot] = to_rgba8(&view).map(|rgba| ImageBind {
-                        version,
-                        bind: self.upload_image(gpu, &rgba, view.w, view.h, view.linear),
-                    });
+                    // PSM_8888 bytes are already RGBA8: upload the record's
+                    // plane by borrow. Queue::write_texture accepts
+                    // bytes_per_row values that are not 256-byte multiples,
+                    // so this path allocates no conversion or staging plane
+                    // of its own. Every other format converts once per
+                    // content revision.
+                    let bytes = (view.w as usize) * (view.h as usize) * 4;
+                    self.images[slot] = if view.psm == spec::psm::PSM_8888
+                        && view.pixels.len() >= bytes
+                    {
+                        Some(ImageBind {
+                            version,
+                            bind: self.upload_image(gpu, view.pixels, view.w, view.h, view.linear),
+                        })
+                    } else {
+                        to_rgba8(&view).map(|rgba| ImageBind {
+                            version,
+                            bind: self.upload_image(gpu, &rgba, view.w, view.h, view.linear),
+                        })
+                    };
                 }
                 None => self.images[slot] = None,
             }
@@ -989,7 +1005,9 @@ impl UiRenderer {
     }
 }
 
-/// Expand a core texture (PSM 5650/8888/4444/T8) to tightly-packed RGBA8.
+/// Expand a converting core texture (PSM 5650/4444/T8) to tightly-packed
+/// RGBA8. PSM_8888 views never route through here — `sync_textures` uploads
+/// their bytes without conversion.
 fn to_rgba8(view: &TexView) -> Option<Vec<u8>> {
     let count = (view.w * view.h) as usize;
     let pixels = view.pixels;
@@ -1010,10 +1028,6 @@ fn to_rgba8(view: &TexView) -> Option<Vec<u8>> {
                 out.push(255);
             }
             Some(out)
-        }
-        spec::psm::PSM_8888 => {
-            let bytes = count * 4;
-            (pixels.len() >= bytes).then(|| pixels[..bytes].to_vec())
         }
         spec::psm::PSM_4444 => {
             // u16 LE, nibbles A<<12 | B<<8 | G<<4 | R; expand n -> n*17.

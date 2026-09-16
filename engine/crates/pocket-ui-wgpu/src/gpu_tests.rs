@@ -358,3 +358,55 @@ fn gpu_drawlist_composition_and_resource_lifecycle() {
     );
     close(&pixels, &[64, 96, 128, 255].repeat(256), 1);
 }
+
+/// An owned RGBA8 plane admitted through `Ui::upload_owned_rgba8` uploads
+/// from the record's own allocation — no aligned-store copy, no conversion
+/// Vec — and renders identically to the software rasterizer. The 3x2 plane
+/// (rows of 12 bytes, not a multiple of 256) pins the unaligned
+/// `bytes_per_row` path of `Queue::write_texture`.
+#[test]
+fn gpu_owned_rgba8_admission_uploads_the_admitted_allocation() {
+    let gpu = Gpu::new_headless().expect("GPU required for DrawList conformance");
+    eprintln!("owned-plane admission: {:?}", gpu.adapter.get_info());
+    let mut ui = Ui::new();
+    ui.set_viewport(16.0, 16.0);
+    let colors: [[u8; 3]; 6] = [
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+        [255, 255, 0],
+        [0, 255, 255],
+        [255, 0, 255],
+    ];
+    let mut plane = Vec::new();
+    for c in colors {
+        plane.extend([c[0], c[1], c[2], 255]);
+    }
+    let src = plane.as_ptr();
+    let handle = ui.upload_owned_rgba8(plane, 3, 2, false);
+    assert!(handle >= 0);
+    // The admitted allocation IS the record: sync_textures borrows these
+    // exact bytes for the GPU upload (the copy oracle — a staged or
+    // converted upload would live at a different address than the source).
+    let view = ui.texture(handle).unwrap();
+    assert_eq!(view.pixels.as_ptr(), src);
+
+    let out = target(&gpu, 16, wgpu::TextureFormat::Rgba8Unorm);
+    let mut renderer = UiRenderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm);
+    let w = image(handle, 0, 0, 16, 16);
+    let mut expected = vec![0; 16 * 16 * 4];
+    raster::render_scaled(&ui, &w, &mut expected, 1);
+    close(&draw(&gpu, &mut renderer, &ui, &w, &out, 1), &expected, 0);
+
+    // Freeing the record evicts the GPU cache entry on the next sweep; the
+    // stale draw reference renders nothing, like every other stale handle.
+    ui.free_texture(handle);
+    let mut stale = w.to_vec();
+    stale.extend([op::RECT, packed(2, 2), packed(4, 4), 0xff802040]);
+    raster::render_scaled(&ui, &stale, &mut expected, 1);
+    close(
+        &draw(&gpu, &mut renderer, &ui, &stale, &out, 1),
+        &expected,
+        0,
+    );
+}

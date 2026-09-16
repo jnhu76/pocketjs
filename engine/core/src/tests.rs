@@ -3923,3 +3923,79 @@ fn font_revision_changes_only_after_successful_load_and_is_slot_local() {
     assert_eq!(ui.font_atlas_revision(0), 0);
     assert_eq!(ui.font_atlas_revision(255), 0);
 }
+
+#[test]
+fn upload_owned_rgba8_moves_the_plane_without_a_copy() {
+    let mut ui = Ui::new();
+    // Non-pow2 width: rows of 4612 bytes, not a multiple of any GPU copy
+    // alignment — the plane a decoder hands the host.
+    let (w, h) = (1153u32, 3u32);
+    let mut pixels = alloc::vec![0u8; (w * h * 4) as usize];
+    for (i, b) in pixels.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    let src = pixels.as_ptr();
+    let handle = ui.upload_owned_rgba8(pixels, w, h, true);
+    assert!(handle >= 0);
+    let view = ui.texture(handle).expect("live owned plane");
+    // The record stores the caller's own allocation: an aligned-store
+    // (copy_aligned) admission would be a different allocation with a
+    // different address.
+    assert_eq!(view.pixels.as_ptr(), src);
+    assert_eq!(view.pixels.len(), (w * h * 4) as usize);
+    for (i, &b) in view.pixels.iter().enumerate() {
+        assert_eq!(b, (i % 251) as u8);
+    }
+    assert_eq!((view.w, view.h), (w, h));
+    assert_eq!(view.psm, spec::psm::PSM_8888);
+    assert!(view.linear);
+    // Immutable admission: no in-place update path for RGBA records.
+    assert_eq!(ui.texture_revision(handle), Some(0));
+    assert!(!ui.update_texture_t8(handle, &alloc::vec![0u8; 1024], &[0]));
+    assert_eq!(ui.texture_revision(handle), Some(0));
+}
+
+#[test]
+fn upload_owned_rgba8_rejects_bad_planes() {
+    let mut ui = Ui::new();
+    let four = alloc::vec![1u8, 2, 3, 4];
+    assert_eq!(ui.upload_owned_rgba8(four.clone(), 0, 1, false), -1);
+    assert_eq!(ui.upload_owned_rgba8(four.clone(), 1, 0, false), -1);
+    assert_eq!(ui.upload_owned_rgba8(four.clone(), 8193, 1, false), -1);
+    assert_eq!(ui.upload_owned_rgba8(four.clone(), 1, 8193, false), -1);
+    assert_eq!(ui.upload_owned_rgba8(alloc::vec![1u8, 2, 3], 1, 1, false), -1);
+    assert_eq!(
+        ui.upload_owned_rgba8(alloc::vec![1u8, 2, 3, 4, 5], 1, 1, false),
+        -1
+    );
+    // Every rejection consumed no slot and left the revision unchanged.
+    assert_eq!(ui.texture_slot_count(), 0);
+    let rev = ui.raster_revision();
+    assert_eq!(ui.upload_owned_rgba8(alloc::vec![1u8, 2, 3], 1, 1, false), -1);
+    assert_eq!(ui.raster_revision(), rev);
+}
+
+#[test]
+fn upload_owned_rgba8_handle_lifecycle_matches_pak_textures() {
+    let mut ui = Ui::new();
+    let a = ui.upload_owned_rgba8(alloc::vec![10u8, 20, 30, 40], 1, 1, false);
+    let b = ui.upload_owned_rgba8(alloc::vec![50u8, 60, 70, 80], 1, 1, false);
+    assert!(a >= 0 && b >= 0 && a != b);
+    ui.free_texture(a);
+    assert!(ui.texture(a).is_none());
+    // LIFO slot reuse under a fresh generation: the re-created texture lands
+    // in a's slot with a bumped generation tag, and the stale handle keeps
+    // resolving to nothing.
+    let c = ui.upload_owned_rgba8(alloc::vec![90u8, 100, 110, 120], 1, 1, false);
+    assert_eq!(
+        c as u32 & spec::TEX_SLOT_MASK,
+        a as u32 & spec::TEX_SLOT_MASK
+    );
+    assert_ne!(c, a);
+    assert!(ui.texture(a).is_none());
+    assert_eq!(ui.texture(c).unwrap().pixels, &[90, 100, 110, 120]);
+    ui.free_texture(b);
+    ui.free_texture(c);
+    assert_eq!(ui.texture_slot_count(), 2); // slots stay allocated (free list)
+    assert!(ui.texture(b).is_none() && ui.texture(c).is_none());
+}
