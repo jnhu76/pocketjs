@@ -27,14 +27,15 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Window, WindowId},
 };
-mod geometry;
 mod gpu;
 mod net;
 include!("plan.rs");
 include!("supervisor.rs");
 include!("buttons.rs");
 
-use geometry::{PresentationGeometry, RenderSignature, ViewportPolicy, resolve_geometry};
+use pocket_desktop_host::{
+    PresentationGeometry, RenderSignature, ViewportPolicy, resolve_geometry,
+};
 
 fn text_worker(pak: Vec<u8>) -> OffloadWorker {
     OffloadWorker::spawn(move || {

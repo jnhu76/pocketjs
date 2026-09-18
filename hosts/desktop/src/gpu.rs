@@ -11,7 +11,7 @@
 //!   (Linear) only as a size bridge. Cached per Target as a `BlitSet` so the
 //!   filter is not frozen at first use.
 use super::*;
-use crate::geometry::child_surface_size;
+use pocket_desktop_host::geometry::child_surface_size;
 use pocket_ui_wgpu::{BlitFilter, BlitSet, UiRenderer};
 use pocket3d::gpu::Gpu;
 use std::sync::{Arc, Weak};
