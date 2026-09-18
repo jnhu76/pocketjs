@@ -8,6 +8,17 @@
 //! Package raster density remains resource/cook authority (fonts, baked
 //! assets, `Ui::new_with_raster_density`). It is NOT the live presentation
 //! scale.
+//!
+//! Desktop dynamic logical bounds restore the published platform contract in
+//! `contracts/spec/platforms.ts` (`macos-app` / `linux-app` / `windows-app`):
+//! `dynamicViewport: { min: [240, 180], max: [4096, 4096] }`.
+//! Named constants live here so geometry does not parse the contract file.
+
+/// Public Desktop dynamic logical minimum (`platforms.ts` macos/linux/windows).
+pub const DESKTOP_DYNAMIC_MIN: (u32, u32) = (240, 180);
+
+/// Public Desktop dynamic logical maximum (`platforms.ts` macos/linux/windows).
+pub const DESKTOP_DYNAMIC_MAX: (u32, u32) = (4096, 4096);
 
 /// Immutable live presentation snapshot shared by the window thread, runtime
 /// worker, renderer, and present path.
@@ -75,9 +86,11 @@ pub enum ViewportPolicy {
 
 /// Single geometry resolver for boot, `Resized`, and `ScaleFactorChanged`.
 ///
-/// - **Fixed:** logical = `product_logical`; physical/scale still measured.
-/// - **Dynamic:** logical derived from measured physical ÷ live scale.
-/// - **Both:** physical is measured (never `logical × scale` / density).
+/// - **Fixed:** logical = `product_logical` (no dynamic bounds derivation).
+/// - **Dynamic:** logical = `round(measured_physical / live_scale)`, clamped
+///   to [`DESKTOP_DYNAMIC_MIN`] .. [`DESKTOP_DYNAMIC_MAX`].
+/// - **Both:** physical is measured (never clamped to the logical target
+///   range; never `logical × scale` / package density).
 pub fn resolve_geometry(
     policy: ViewportPolicy,
     product_logical: (u32, u32),
@@ -91,16 +104,27 @@ pub fn resolve_geometry(
     };
     let logical = match policy {
         ViewportPolicy::Fixed => product_logical,
-        ViewportPolicy::Dynamic => (
-            (measured_physical.0 as f64 / scale)
-                .round()
-                .clamp(1.0, 8192.0) as u32,
-            (measured_physical.1 as f64 / scale)
-                .round()
-                .clamp(1.0, 8192.0) as u32,
-        ),
+        ViewportPolicy::Dynamic => dynamic_logical_from_measured(measured_physical, scale),
     };
     PresentationGeometry::from_live(logical, measured_physical, os_scale)
+}
+
+/// Dynamic logical viewport: measured physical ÷ live scale, clamped to the
+/// public Desktop target contract. Does not touch measured physical authority.
+fn dynamic_logical_from_measured(measured_physical: (u32, u32), os_scale: f64) -> (u32, u32) {
+    let scale = if os_scale > 0.0 && os_scale.is_finite() {
+        os_scale
+    } else {
+        1.0
+    };
+    let min = DESKTOP_DYNAMIC_MIN;
+    let max = DESKTOP_DYNAMIC_MAX;
+    let lw = (measured_physical.0 as f64 / scale).round();
+    let lh = (measured_physical.1 as f64 / scale).round();
+    (
+        (lw.clamp(min.0 as f64, max.0 as f64)) as u32,
+        (lh.clamp(min.1 as f64, max.1 as f64)) as u32,
+    )
 }
 
 /// Child compositor target size = package child logical × **live** scale.
@@ -235,14 +259,8 @@ mod tests {
         // First frame always renders.
         assert!(a.needs_rerender(None));
         // Draw or revision change also rerenders.
-        assert_ne!(
-            a,
-            RenderSignature::new(0xabd, 9, (1920, 1280), 2.0)
-        );
-        assert_ne!(
-            a,
-            RenderSignature::new(0xabc, 10, (1920, 1280), 2.0)
-        );
+        assert_ne!(a, RenderSignature::new(0xabd, 9, (1920, 1280), 2.0));
+        assert_ne!(a, RenderSignature::new(0xabc, 10, (1920, 1280), 2.0));
     }
 
     #[test]
@@ -251,7 +269,10 @@ mod tests {
         let sig = RenderSignature::from_geometry(1, 2, geo);
         assert_eq!(sig.physical_w, 1440);
         assert_eq!(sig.physical_h, 960);
-        assert_eq!(sig.render_scale_bits, geo.effective_render_scale().to_bits());
+        assert_eq!(
+            sig.render_scale_bits,
+            geo.effective_render_scale().to_bits()
+        );
         assert_eq!(sig, RenderSignature::new(1, 2, (1440, 960), 2.0));
     }
 
@@ -276,10 +297,7 @@ mod tests {
         assert_eq!(after.physical(), (1080, 720));
         assert_eq!(after.effective_render_scale(), 1.5f32);
         assert_ne!(before.physical(), after.physical());
-        assert_ne!(
-            before.render_scale_bits,
-            after.render_scale_bits
-        );
+        assert_ne!(before.render_scale_bits, after.render_scale_bits);
         // RenderSignature must invalidate on live presentation change.
         let sig_before = RenderSignature::from_geometry(1, 2, before);
         let sig_after = RenderSignature::from_geometry(1, 2, after);
@@ -296,6 +314,47 @@ mod tests {
         assert_eq!(geo.logical(), (960, 640));
         assert_eq!(geo.physical(), (1200, 800));
         assert_eq!(geo.effective_render_scale(), 1.25f32);
+    }
+
+    #[test]
+    fn dynamic_logical_clamps_to_public_desktop_minimum() {
+        // Measured 200×100 @ scale 2.0 would derive 100×50 — below public floor.
+        let geo = resolve_geometry(ViewportPolicy::Dynamic, (720, 480), (200, 100), 2.0);
+        assert_eq!(geo.logical(), DESKTOP_DYNAMIC_MIN);
+        assert_eq!(geo.logical(), (240, 180));
+        // Physical authority is measured, not clamped into logical range.
+        assert_eq!(geo.physical(), (200, 100));
+        assert_eq!(geo.effective_render_scale(), 2.0f32);
+        // Explicit floor checks required by CORRECTIVE-2.
+        let (lw, lh) = geo.logical();
+        assert!(lw >= 240 && lh >= 180);
+    }
+
+    #[test]
+    fn dynamic_logical_clamps_to_public_desktop_maximum() {
+        // Measured 10000×9000 @ scale 1.0 → logical 10000×9000 > 4096.
+        let geo = resolve_geometry(ViewportPolicy::Dynamic, (720, 480), (10000, 9000), 1.0);
+        assert_eq!(geo.logical(), DESKTOP_DYNAMIC_MAX);
+        assert_eq!(geo.logical(), (4096, 4096));
+        // Measured physical remains unchanged (not clamped to logical max).
+        assert_eq!(geo.physical(), (10000, 9000));
+        assert_eq!(geo.effective_render_scale(), 1.0f32);
+        // Partial: only one axis over max.
+        let mixed = resolve_geometry(ViewportPolicy::Dynamic, (720, 480), (9000, 800), 1.0);
+        assert_eq!(mixed.logical(), (4096, 800));
+        assert_eq!(mixed.physical(), (9000, 800));
+    }
+
+    #[test]
+    fn fixed_policy_does_not_acquire_dynamic_clamping() {
+        // Product logical below dynamic min must remain product authority.
+        let tiny = resolve_geometry(ViewportPolicy::Fixed, (100, 80), (899, 599), 1.25);
+        assert_eq!(tiny.logical(), (100, 80));
+        assert_eq!(tiny.physical(), (899, 599));
+        // Product logical above dynamic max must remain product authority.
+        let huge = resolve_geometry(ViewportPolicy::Fixed, (5000, 5000), (1080, 720), 1.5);
+        assert_eq!(huge.logical(), (5000, 5000));
+        assert_eq!(huge.physical(), (1080, 720));
     }
 
     #[test]

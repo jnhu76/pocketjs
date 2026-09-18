@@ -157,12 +157,8 @@ impl Renderer {
             let child = self.children.get_mut(&instance.surface_handle).unwrap();
             instance.surface.with_ui(|ui| -> Result<()> {
                 let words = ui.draw().words.clone();
-                let signature = RenderSignature::new(
-                    fnv1a64(&words),
-                    ui.raster_revision(),
-                    child_size,
-                    scale,
-                );
+                let signature =
+                    RenderSignature::new(fnv1a64(&words), ui.raster_revision(), child_size, scale);
                 if child.signature != Some(signature) {
                     child.renderer.render_words_scaled(
                         &self.gpu,

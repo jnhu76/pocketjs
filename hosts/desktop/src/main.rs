@@ -309,8 +309,7 @@ impl Runtime {
     fn signature(&mut self) -> RenderSignature {
         let (draw_hash, raster_revision) = self.surface.with_ui(|ui| {
             (
-                fnv1a64(&ui.draw().words)
-                    ^ self.supervisor.visible_hash().rotate_left(17),
+                fnv1a64(&ui.draw().words) ^ self.supervisor.visible_hash().rotate_left(17),
                 ui.raster_revision(),
             )
         });
@@ -597,11 +596,7 @@ impl ApplicationHandler<Wake> for Host {
         // the measurement. Never rebuild physical as logical × scale.
         let physical = window.inner_size();
         let os_scale = window.scale_factor();
-        let package_density = self
-            .startup
-            .as_ref()
-            .map(|s| s.args.density)
-            .unwrap_or(2);
+        let package_density = self.startup.as_ref().map(|s| s.args.density).unwrap_or(2);
         let policy = if self.fixed {
             ViewportPolicy::Fixed
         } else {
@@ -638,14 +633,7 @@ impl ApplicationHandler<Wake> for Host {
             .name("pocket-runtime".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_runtime(
-                        args,
-                        initial_geometry,
-                        inputs,
-                        outputs,
-                        proxy.clone(),
-                        gpu,
-                    )
+                    run_runtime(args, initial_geometry, inputs, outputs, proxy.clone(), gpu)
                 }))
                 .unwrap_or_else(|_| Err(anyhow!("Runtime worker panicked")));
                 let _ = proxy.send_event(Wake::Exit(result.err().map(|e| format!("{e:#}"))));
@@ -748,24 +736,24 @@ impl ApplicationHandler<Wake> for Host {
             WindowEvent::Resized(size) => {
                 // Physical client size is authority. Fixed vs dynamic only
                 // changes how logical layout is resolved downstream.
-                let Some(window) = self.window.clone() else { return };
+                let Some(window) = self.window.clone() else {
+                    return;
+                };
                 let scale = window.scale_factor();
                 let policy = if self.fixed {
                     ViewportPolicy::Fixed
                 } else {
                     ViewportPolicy::Dynamic
                 };
-                let geometry = resolve_geometry(
-                    policy,
-                    self.viewport,
-                    (size.width, size.height),
-                    scale,
-                );
+                let geometry =
+                    resolve_geometry(policy, self.viewport, (size.width, size.height), scale);
                 self.send(Input::Resize(geometry));
                 window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                let Some(window) = self.window.clone() else { return };
+                let Some(window) = self.window.clone() else {
+                    return;
+                };
                 let size = window.inner_size();
                 let policy = if self.fixed {
                     ViewportPolicy::Fixed
