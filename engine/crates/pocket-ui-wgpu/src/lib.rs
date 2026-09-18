@@ -17,7 +17,7 @@ mod blit;
 mod overlay;
 mod render;
 
-pub use blit::Blit;
+pub use blit::{Blit, BlitFilter, BlitSet};
 pub use overlay::UiOverlay;
 pub use render::UiRenderer;
 // The backend-agnostic surface (UiSurface + pak walk) — re-exported so desktop

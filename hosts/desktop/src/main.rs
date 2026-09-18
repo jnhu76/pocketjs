@@ -27,11 +27,14 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Window, WindowId},
 };
+mod geometry;
 mod gpu;
 mod net;
 include!("plan.rs");
 include!("supervisor.rs");
 include!("buttons.rs");
+
+use geometry::{PresentationGeometry, RenderSignature};
 
 fn text_worker(pak: Vec<u8>) -> OffloadWorker {
     OffloadWorker::spawn(move || {
@@ -44,7 +47,8 @@ fn text_worker(pak: Vec<u8>) -> OffloadWorker {
 enum Input {
     Service(Value),
     Pointer(Value),
-    Resize(u32, u32),
+    /// Live presentation geometry snapshot (logical + measured physical + scale).
+    Resize(PresentationGeometry),
     Button(u32, bool),
     Reset,
     Quit,
@@ -83,6 +87,9 @@ struct Runtime {
     supervisor: AppSupervisor,
     offload: OffloadWorker,
     viewport: (u32, u32),
+    /// Live presentation geometry (Corrective A). Physical size is measured
+    /// on the UI thread and preserved — not rebuilt from package density.
+    geometry: PresentationGeometry,
     ticks: u64,
     buttons: u32,
     script: Vec<ScriptEvent>,
@@ -93,7 +100,7 @@ struct Runtime {
     wire: Option<net::SvcWire>,
 }
 impl Runtime {
-    fn boot(args: Args) -> Result<Self> {
+    fn boot(args: Args, geometry: PresentationGeometry) -> Result<Self> {
         if args.native_text {
             return Err(anyhow!(
                 "text.layout.native is unavailable; use the portable text offload capability"
@@ -101,8 +108,9 @@ impl Runtime {
         }
         let pak = std::fs::read(resolve_asset(args.pak.clone(), &args.app, "pak")?)?;
         let source = std::fs::read_to_string(resolve_asset(args.js.clone(), &args.app, "js")?)?;
+        // Package raster density remains cook authority for baked resources.
         let surface = UiSurface::new_with_density(
-            (args.viewport.0 as f32, args.viewport.1 as f32),
+            (geometry.logical_w as f32, geometry.logical_h as f32),
             args.density,
         );
         surface.set_identity(HOST_ID, HOST_ABI);
@@ -118,9 +126,19 @@ impl Runtime {
         if !guest.has_frame() {
             return Err(anyhow!("bundle installed no frame handler"));
         }
+        // Boot hello carries the MEASURED live geometry, not a rebuilt guess.
         surface.svc_push(
-            json!({"t":"hello","w":args.viewport.0,"h":args.viewport.1,"epoch":epoch_ms()})
-                .to_string(),
+            json!({
+                "t":"hello",
+                "w":geometry.logical_w,
+                "h":geometry.logical_h,
+                "scale":geometry.effective_render_scale(),
+                "physical_w":geometry.physical_w,
+                "physical_h":geometry.physical_h,
+                "package_density":args.density,
+                "epoch":epoch_ms()
+            })
+            .to_string(),
         );
         if let Some(file) = &args.file
             && let Ok(text) = std::fs::read_to_string(file)
@@ -132,7 +150,8 @@ impl Runtime {
             .clone()
             .map(|addr| net::SvcWire::spawn(addr, args.app.clone()));
         Ok(Self {
-            viewport: args.viewport,
+            viewport: geometry.logical(),
+            geometry,
             script: args.script.clone(),
             args,
             surface,
@@ -182,15 +201,24 @@ impl Runtime {
                     }
                 }
             }
-            Input::Resize(w, h) if !self.args.fixed => {
+            Input::Resize(geometry) if !self.args.fixed => {
+                let (w, h) = geometry.logical();
                 self.viewport = (w, h);
+                self.geometry = geometry;
                 self.surface
                     .with_ui(|ui| ui.set_viewport(w as f32, h as f32));
                 self.guest.eval(
                     "resize",
                     &format!("globalThis.__pocketResizeViewport?.({w},{h})"),
                 )?;
-                self.svc(json!({"t":"resize","w":w,"h":h}));
+                self.svc(json!({
+                    "t":"resize",
+                    "w":w,
+                    "h":h,
+                    "scale":geometry.effective_render_scale(),
+                    "physical_w":geometry.physical_w,
+                    "physical_h":geometry.physical_h,
+                }));
             }
             _ => {}
         }
@@ -255,11 +283,17 @@ impl Runtime {
         self.ticks += 1;
         Ok(intents)
     }
-    fn hash(&mut self) -> u64 {
-        self.surface
-            .with_ui(|ui| fnv1a64(&ui.draw().words) ^ ui.raster_revision().rotate_left(7))
-            ^ self.supervisor.visible_hash().rotate_left(17)
-            ^ ((self.viewport.0 as u64) << 32 | self.viewport.1 as u64)
+    /// Explicit presentation render signature (R1). Includes live physical
+    /// target size and the effective f32 render-scale bits used for raster.
+    fn signature(&mut self) -> RenderSignature {
+        let (draw_hash, raster_revision) = self.surface.with_ui(|ui| {
+            (
+                fnv1a64(&ui.draw().words)
+                    ^ self.supervisor.visible_hash().rotate_left(17),
+                ui.raster_revision(),
+            )
+        });
+        RenderSignature::from_geometry(draw_hash, raster_revision, self.geometry)
     }
     fn run_script(&mut self) {
         let tick = self.ticks;
@@ -318,6 +352,7 @@ impl Runtime {
 }
 fn run_runtime(
     args: Args,
+    initial_geometry: PresentationGeometry,
     inputs: Receiver<Input>,
     outputs: SyncSender<Output>,
     proxy: EventLoopProxy<Wake>,
@@ -325,8 +360,8 @@ fn run_runtime(
 ) -> Result<()> {
     let available = Arc::new(AtomicBool::new(true));
     let mut renderer = gpu::Renderer::new(gpu);
-    let mut runtime = Runtime::boot(args)?;
-    let mut hash = None;
+    let mut runtime = Runtime::boot(args, initial_geometry)?;
+    let mut signature: Option<RenderSignature> = None;
     let mut intents = Vec::new();
     let mut deadline = Instant::now();
     loop {
@@ -344,12 +379,23 @@ fn run_runtime(
         if intents.len() > 128 {
             return Err(anyhow!("Host intent queue exceeded budget"));
         }
-        let next = runtime.hash();
-        if (hash != Some(next) || !intents.is_empty())
+        let next = runtime.signature();
+        if (signature != Some(next) || !intents.is_empty())
             && let Some(permit) = OutputPermit::acquire(&available)
         {
-            let target = if hash != Some(next) {
+            let target = if signature != Some(next) {
                 let start = Instant::now();
+                let geo = runtime.geometry;
+                log::info!(
+                    "R1 render: logical={}x{} os_scale={} package_density={} retained={}x{} scale_bits={:?}",
+                    geo.logical_w,
+                    geo.logical_h,
+                    geo.effective_render_scale(),
+                    runtime.args.density,
+                    geo.physical_w,
+                    geo.physical_h,
+                    geo.effective_render_scale()
+                );
                 let frame = renderer.render(&mut runtime)?;
                 trace_frame(
                     runtime.args.trace_frames,
@@ -371,7 +417,7 @@ fn run_runtime(
             match outputs.try_send(output) {
                 Ok(()) => {
                     if rendered {
-                        hash = Some(next);
+                        signature = Some(next);
                     }
                     let _ = proxy.send_event(Wake::Output);
                 }
@@ -400,6 +446,8 @@ struct RuntimeStartup {
     inputs: Receiver<Input>,
     outputs: SyncSender<Output>,
     proxy: EventLoopProxy<Wake>,
+    /// Measured on the window thread after create; physical is first-class.
+    initial_geometry: PresentationGeometry,
 }
 struct Host {
     window: Option<Arc<Window>>,
@@ -523,17 +571,58 @@ impl ApplicationHandler<Wake> for Host {
         };
         let gpu = presentation.gpu.clone();
         self.surface = Some(presentation);
+        // Corrective A: capture the ACTUAL physical client size + live OS
+        // scale after the window exists. Do not rebuild physical as
+        // logical × scale.
+        let physical = window.inner_size();
+        let os_scale = window.scale_factor();
+        let package_density = self
+            .startup
+            .as_ref()
+            .map(|s| s.args.density)
+            .unwrap_or(2);
+        let logical = (
+            (physical.width as f64 / os_scale)
+                .round()
+                .clamp(240.0, 4096.0) as u32,
+            (physical.height as f64 / os_scale)
+                .round()
+                .clamp(180.0, 4096.0) as u32,
+        );
+        let initial_geometry =
+            PresentationGeometry::from_live(logical, (physical.width, physical.height), os_scale);
+        log::info!(
+            "R1 boot geometry: logical={}x{} physical={}x{} os_scale={} package_density={}",
+            initial_geometry.logical_w,
+            initial_geometry.logical_h,
+            initial_geometry.physical_w,
+            initial_geometry.physical_h,
+            initial_geometry.effective_render_scale(),
+            package_density
+        );
         let RuntimeStartup {
             args,
             inputs,
             outputs,
             proxy,
-        } = self.startup.take().expect("runtime startup");
+            initial_geometry,
+        } = {
+            let mut startup = self.startup.take().expect("runtime startup");
+            startup.initial_geometry = initial_geometry;
+            startup
+        };
         if let Err(error) = thread::Builder::new()
             .name("pocket-runtime".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_runtime(args, inputs, outputs, proxy.clone(), gpu)
+                    run_runtime(
+                        args,
+                        initial_geometry,
+                        inputs,
+                        outputs,
+                        proxy.clone(),
+                        gpu,
+                    )
                 }))
                 .unwrap_or_else(|_| Err(anyhow!("Runtime worker panicked")));
                 let _ = proxy.send_event(Wake::Exit(result.err().map(|e| format!("{e:#}"))));
@@ -634,12 +723,40 @@ impl ApplicationHandler<Wake> for Host {
                 }
             }
             WindowEvent::Resized(size) => {
-                let scale = self.window.as_ref().unwrap().scale_factor();
-                self.send(Input::Resize(
+                // Physical client size is authority — preserve it across the
+                // worker boundary. Logical viewport is derived for UI layout.
+                let Some(window) = self.window.clone() else { return };
+                let scale = window.scale_factor();
+                let logical = (
                     (size.width as f64 / scale).round().clamp(240.0, 4096.0) as u32,
                     (size.height as f64 / scale).round().clamp(180.0, 4096.0) as u32,
-                ));
-                self.window.as_ref().unwrap().request_redraw();
+                );
+                let geometry = PresentationGeometry::from_live(
+                    logical,
+                    (size.width, size.height),
+                    scale,
+                );
+                self.send(Input::Resize(geometry));
+                window.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let Some(window) = self.window.clone() else { return };
+                let size = window.inner_size();
+                let logical = (
+                    (size.width as f64 / scale_factor)
+                        .round()
+                        .clamp(240.0, 4096.0) as u32,
+                    (size.height as f64 / scale_factor)
+                        .round()
+                        .clamp(180.0, 4096.0) as u32,
+                );
+                let geometry = PresentationGeometry::from_live(
+                    logical,
+                    (size.width, size.height),
+                    scale_factor,
+                );
+                self.send(Input::Resize(geometry));
+                window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Focused(false) => {
@@ -744,6 +861,7 @@ fn main() -> Result<()> {
         failure: None,
     };
     host.startup = Some(RuntimeStartup {
+        initial_geometry: PresentationGeometry::from_live(args.viewport, (1, 1), 1.0),
         args,
         inputs,
         outputs,

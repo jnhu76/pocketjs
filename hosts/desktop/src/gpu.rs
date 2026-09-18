@@ -1,7 +1,17 @@
 //! GPU resources stay outside the guest ABI. The runtime worker records and
 //! submits rendering; the window thread presents a retained GPU image.
+//!
+//! R1 (PicoView #63 Corrective A/B):
+//! - Retained shell target physical size = live client geometry
+//!   (`PresentationGeometry::physical`), not `viewport × package_density`.
+//! - UI geometry render scale = live presentation scale bits passed to
+//!   `UiRenderer::render_words_scaled`.
+//! - Package raster density remains cook authority for `UiSurface`/fonts only.
+//! - Present policy: Exact (Nearest) when target == swapchain; Transient
+//!   (Linear) only as a size bridge. Cached per Target as a `BlitSet` so the
+//!   filter is not frozen at first use.
 use super::*;
-use pocket_ui_wgpu::{Blit, UiRenderer};
+use pocket_ui_wgpu::{BlitFilter, BlitSet, UiRenderer};
 use pocket3d::gpu::Gpu;
 use std::sync::{Arc, Weak};
 
@@ -48,7 +58,7 @@ struct Child {
     generation: u64,
     target: Target,
     renderer: UiRenderer,
-    hash: Option<u64>,
+    signature: Option<RenderSignature>,
 }
 pub struct Renderer {
     gpu: Arc<Gpu>,
@@ -87,8 +97,11 @@ impl Renderer {
     /// commands. Shared queue ordering then makes reuse safe without readback
     /// or waiting for GPU completion on either CPU thread.
     pub fn render(&mut self, runtime: &mut Runtime) -> Result<Option<Arc<Target>>> {
-        let density = runtime.args.density;
-        let size = (runtime.viewport.0 * density, runtime.viewport.1 * density);
+        let geometry = runtime.geometry;
+        // Corrective A: physical client size is first-class — never rebuild
+        // retained target as logical × package_density.
+        let size = geometry.physical();
+        let scale = geometry.effective_render_scale();
         let Some(frame) = self.acquire_target(size)? else {
             return Ok(None);
         };
@@ -113,7 +126,11 @@ impl Renderer {
                 continue;
             }
             let logical = instance.package.plan.viewport.logical;
-            let child_size = (logical[0] * density, logical[1] * density);
+            // Child package logical × live presentation scale (not package density).
+            let child_size = (
+                ((logical[0] as f32 * scale).round() as u32).max(1),
+                ((logical[1] as f32 * scale).round() as u32).max(1),
+            );
             if !self
                 .children
                 .get(&instance.surface_handle)
@@ -134,15 +151,20 @@ impl Renderer {
                         generation: instance.generation,
                         target,
                         renderer: UiRenderer::new(&self.gpu, FORMAT),
-                        hash: None,
+                        signature: None,
                     },
                 );
             }
             let child = self.children.get_mut(&instance.surface_handle).unwrap();
             instance.surface.with_ui(|ui| -> Result<()> {
                 let words = ui.draw().words.clone();
-                let hash = fnv1a64(&words) ^ ui.raster_revision().rotate_left(7);
-                if child.hash != Some(hash) {
+                let signature = RenderSignature::new(
+                    fnv1a64(&words),
+                    ui.raster_revision(),
+                    child_size,
+                    scale,
+                );
+                if child.signature != Some(signature) {
                     child.renderer.render_words_scaled(
                         &self.gpu,
                         ui,
@@ -150,10 +172,10 @@ impl Renderer {
                         &mut encoder,
                         &child.target.view,
                         child_size,
-                        density as f32,
+                        scale,
                         wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     )?;
-                    child.hash = Some(hash);
+                    child.signature = Some(signature);
                 }
                 Ok(())
             })?;
@@ -167,7 +189,7 @@ impl Renderer {
                 &mut encoder,
                 &frame.view,
                 size,
-                density as f32,
+                scale,
                 wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             )
         })?;
@@ -180,7 +202,8 @@ pub struct Presentation {
     pub gpu: Arc<Gpu>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    blits: Vec<(Weak<Target>, Blit)>,
+    /// Cached Exact+Transient blit pair per retained Target (Corrective B).
+    blits: Vec<(Weak<Target>, BlitSet)>,
 }
 impl Presentation {
     pub fn new(window: Arc<Window>) -> Result<Self> {
@@ -237,6 +260,17 @@ impl Presentation {
             self.config.height = size.height;
             self.surface.configure(&self.gpu.device, &self.config);
         }
+        let swapchain = (self.config.width, self.config.height);
+        let policy = BlitFilter::select(target.size, swapchain);
+        log::info!(
+            "R1 present: retained={}x{} swapchain={}x{} policy={:?} filter={:?}",
+            target.size.0,
+            target.size.1,
+            swapchain.0,
+            swapchain.1,
+            policy,
+            policy.wgpu_filter()
+        );
         let output = match self.surface.get_current_texture() {
             Ok(output) => output,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -252,6 +286,7 @@ impl Presentation {
         };
         // Weak identities retain bind groups without leasing a frame from the
         // worker's bounded pool. Rebuild only when the pool changes on resize.
+        // Filter policy is selected per present from live sizes — not frozen.
         self.blits.retain(|(frame, _)| frame.strong_count() > 0);
         let key = Arc::downgrade(target);
         let index = match self
@@ -261,14 +296,8 @@ impl Presentation {
         {
             Some(index) => index,
             None => {
-                let blit = Blit::new(
-                    &self.gpu,
-                    &target.view,
-                    self.config.format,
-                    wgpu::FilterMode::Nearest,
-                    false,
-                );
-                self.blits.push((key, blit));
+                let blits = BlitSet::new(&self.gpu, &target.view, self.config.format, false);
+                self.blits.push((key, blits));
                 self.blits.len() - 1
             }
         };
@@ -294,7 +323,7 @@ impl Presentation {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            self.blits[index].1.draw(&mut pass);
+            self.blits[index].1.draw(&mut pass, policy);
         }
         self.gpu.queue.submit([encoder.finish()]);
         window.pre_present_notify();

@@ -1,6 +1,12 @@
 //! Fullscreen-triangle blit: composite one texture onto another target.
-//! Nearest for chunky integer upscales (the PSP look), linear for smooth
-//! DPI scaling (HUD overlays on hidpi swapchains).
+//!
+//! R1 presentation policy (PicoView #63 Corrective B):
+//! - **Exact** — retained target size == swapchain size. Nearest, no blur.
+//! - **Transient** — sizes differ (OS window moved ahead of the worker).
+//!   Linear bridge only until an exact-size frame arrives.
+//!
+//! A cached blit for one Target must support both policies; filter is chosen
+//! per presentation, not frozen at first use.
 
 use pocket3d::gpu::Gpu;
 
@@ -25,6 +31,38 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     return textureSample(tex, samp, in.uv);
 }
 "#;
+
+/// Retained-target presentation filter policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlitFilter {
+    /// Settled exact frame: `target.size == swapchain.size`.
+    Exact,
+    /// Transient size bridge while an exact frame is pending.
+    Transient,
+}
+
+impl BlitFilter {
+    pub fn wgpu_filter(self) -> wgpu::FilterMode {
+        match self {
+            BlitFilter::Exact => wgpu::FilterMode::Nearest,
+            BlitFilter::Transient => wgpu::FilterMode::Linear,
+        }
+    }
+
+    /// Select policy from retained source vs live swapchain destination.
+    /// Zero-sized destinations are transient (nothing exact to present).
+    pub fn select(source: (u32, u32), destination: (u32, u32)) -> BlitFilter {
+        if source.0 > 0
+            && source.1 > 0
+            && source.0 == destination.0
+            && source.1 == destination.1
+        {
+            BlitFilter::Exact
+        } else {
+            BlitFilter::Transient
+        }
+    }
+}
 
 pub struct Blit {
     pipeline: wgpu::RenderPipeline,
@@ -133,5 +171,67 @@ impl Blit {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+/// Cached presentation blit pair for one retained Target.
+///
+/// Both policies are prebuilt at first use. Per present, select Exact or
+/// Transient from live sizes — do not freeze the filter on the Target.
+pub struct BlitSet {
+    exact: Blit,
+    transient: Blit,
+}
+
+impl BlitSet {
+    pub fn new(gpu: &Gpu, src: &wgpu::TextureView, format: wgpu::TextureFormat, blend: bool) -> Self {
+        Self {
+            exact: Blit::new(gpu, src, format, BlitFilter::Exact.wgpu_filter(), blend),
+            transient: Blit::new(
+                gpu,
+                src,
+                format,
+                BlitFilter::Transient.wgpu_filter(),
+                blend,
+            ),
+        }
+    }
+
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, filter: BlitFilter) {
+        match filter {
+            BlitFilter::Exact => self.exact.draw(pass),
+            BlitFilter::Transient => self.transient.draw(pass),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlitFilter;
+
+    /// Corrective B regression: same Target, changing surface size switches
+    /// policy; returning to exact size uses Exact again.
+    #[test]
+    fn exact_transient_policy_survives_target_identity() {
+        let target = (1000u32, 700u32);
+
+        // Exact now.
+        assert_eq!(BlitFilter::select(target, (1000, 700)), BlitFilter::Exact);
+        // SAME target -> surface moved ahead -> Transient Linear.
+        assert_eq!(BlitFilter::select(target, (1017, 711)), BlitFilter::Transient);
+        // SAME target again at exact size -> Exact (Nearest), not stuck Linear.
+        assert_eq!(BlitFilter::select(target, (1000, 700)), BlitFilter::Exact);
+        // Downscale/upscale mismatch is also transient.
+        assert_eq!(BlitFilter::select((1920, 1280), (960, 640)), BlitFilter::Transient);
+        assert_eq!(BlitFilter::select((0, 0), (100, 100)), BlitFilter::Transient);
+    }
+
+    #[test]
+    fn exact_filter_is_nearest_transient_is_linear() {
+        assert_eq!(BlitFilter::Exact.wgpu_filter(), wgpu::FilterMode::Nearest);
+        assert_eq!(
+            BlitFilter::Transient.wgpu_filter(),
+            wgpu::FilterMode::Linear
+        );
     }
 }
