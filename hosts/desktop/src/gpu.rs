@@ -11,6 +11,7 @@
 //!   (Linear) only as a size bridge. Cached per Target as a `BlitSet` so the
 //!   filter is not frozen at first use.
 use super::*;
+use crate::geometry::child_surface_size;
 use pocket_ui_wgpu::{BlitFilter, BlitSet, UiRenderer};
 use pocket3d::gpu::Gpu;
 use std::sync::{Arc, Weak};
@@ -126,11 +127,9 @@ impl Renderer {
                 continue;
             }
             let logical = instance.package.plan.viewport.logical;
-            // Child package logical × live presentation scale (not package density).
-            let child_size = (
-                ((logical[0] as f32 * scale).round() as u32).max(1),
-                ((logical[1] as f32 * scale).round() as u32).max(1),
-            );
+            // Child compositor target: package logical × live presentation
+            // scale (MINOR-2 regression lives in geometry::child_surface_size).
+            let child_size = child_surface_size((logical[0], logical[1]), scale);
             if !self
                 .children
                 .get(&instance.surface_handle)
@@ -262,7 +261,7 @@ impl Presentation {
         }
         let swapchain = (self.config.width, self.config.height);
         let policy = BlitFilter::select(target.size, swapchain);
-        log::info!(
+        log::debug!(
             "R1 present: retained={}x{} swapchain={}x{} policy={:?} filter={:?}",
             target.size.0,
             target.size.1,

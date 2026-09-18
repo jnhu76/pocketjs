@@ -60,6 +60,66 @@ impl PresentationGeometry {
     }
 }
 
+/// Product logical viewport authority vs live presentation facts.
+///
+/// `fixed` freezes the **layout/logical** viewport only. Physical client size
+/// and live OS scale remain presentation authority and must keep updating
+/// (monitor DPI change on a size-locked window still resizes the client).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewportPolicy {
+    /// Logical layout follows live client (`physical / scale`).
+    Dynamic,
+    /// Logical layout is the product/package fixed viewport.
+    Fixed,
+}
+
+/// Single geometry resolver for boot, `Resized`, and `ScaleFactorChanged`.
+///
+/// - **Fixed:** logical = `product_logical`; physical/scale still measured.
+/// - **Dynamic:** logical derived from measured physical ÷ live scale.
+/// - **Both:** physical is measured (never `logical × scale` / density).
+pub fn resolve_geometry(
+    policy: ViewportPolicy,
+    product_logical: (u32, u32),
+    measured_physical: (u32, u32),
+    os_scale: f64,
+) -> PresentationGeometry {
+    let scale = if os_scale > 0.0 && os_scale.is_finite() {
+        os_scale
+    } else {
+        1.0
+    };
+    let logical = match policy {
+        ViewportPolicy::Fixed => product_logical,
+        ViewportPolicy::Dynamic => (
+            (measured_physical.0 as f64 / scale)
+                .round()
+                .clamp(1.0, 8192.0) as u32,
+            (measured_physical.1 as f64 / scale)
+                .round()
+                .clamp(1.0, 8192.0) as u32,
+        ),
+    };
+    PresentationGeometry::from_live(logical, measured_physical, os_scale)
+}
+
+/// Child compositor target size = package child logical × **live** scale.
+///
+/// Never `logical × package_raster_density`. Children have no measured OS
+/// window; their physical surface is the parent presentation scale applied
+/// to the package logical extent.
+pub fn child_surface_size(logical: (u32, u32), live_scale: f32) -> (u32, u32) {
+    let scale = if live_scale.is_finite() && live_scale > 0.0 {
+        live_scale
+    } else {
+        1.0
+    };
+    (
+        ((logical.0 as f32 * scale).round() as u32).max(1),
+        ((logical.1 as f32 * scale).round() as u32).max(1),
+    )
+}
+
 /// Explicit demand-render identity for presentation (R1).
 ///
 /// Includes physical target size and the **effective** render scale bits
@@ -193,5 +253,60 @@ mod tests {
         assert_eq!(sig.physical_h, 960);
         assert_eq!(sig.render_scale_bits, geo.effective_render_scale().to_bits());
         assert_eq!(sig, RenderSignature::new(1, 2, (1440, 960), 2.0));
+    }
+
+    #[test]
+    fn fixed_boot_keeps_product_logical_with_measured_physical() {
+        // Product plan 720×480; measured client at 125% is 899×599 (not
+        // reconstructed as 720×1.25). Logical must not be re-derived.
+        let geo = resolve_geometry(ViewportPolicy::Fixed, (720, 480), (899, 599), 1.25);
+        assert_eq!(geo.logical(), (720, 480));
+        assert_eq!(geo.physical(), (899, 599));
+        assert_eq!(geo.effective_render_scale(), 1.25f32);
+        assert_eq!(geo.render_scale_bits, 1.25f32.to_bits());
+    }
+
+    #[test]
+    fn fixed_dpi_change_updates_presentation_not_logical() {
+        let before = resolve_geometry(ViewportPolicy::Fixed, (720, 480), (720, 480), 1.0);
+        let after = resolve_geometry(ViewportPolicy::Fixed, (720, 480), (1080, 720), 1.5);
+        // Layout stays frozen.
+        assert_eq!(after.logical(), (720, 480));
+        // Presentation facts move.
+        assert_eq!(after.physical(), (1080, 720));
+        assert_eq!(after.effective_render_scale(), 1.5f32);
+        assert_ne!(before.physical(), after.physical());
+        assert_ne!(
+            before.render_scale_bits,
+            after.render_scale_bits
+        );
+        // RenderSignature must invalidate on live presentation change.
+        let sig_before = RenderSignature::from_geometry(1, 2, before);
+        let sig_after = RenderSignature::from_geometry(1, 2, after);
+        assert_ne!(sig_before, sig_after);
+        assert!(sig_after.needs_rerender(Some(sig_before)));
+        // Settled exact uses live physical, not frozen 720×480.
+        assert!(after.is_exact_present((1080, 720)));
+        assert!(!after.is_exact_present((720, 480)));
+    }
+
+    #[test]
+    fn dynamic_boot_derives_logical_from_measured_physical() {
+        let geo = resolve_geometry(ViewportPolicy::Dynamic, (720, 480), (1200, 800), 1.25);
+        assert_eq!(geo.logical(), (960, 640));
+        assert_eq!(geo.physical(), (1200, 800));
+        assert_eq!(geo.effective_render_scale(), 1.25f32);
+    }
+
+    #[test]
+    fn child_target_uses_live_scale_not_package_density() {
+        // child logical 400×300, live_scale 1.25 → 500×375.
+        // package_density=2 would wrongly yield 800×600 — must not happen.
+        let child = child_surface_size((400, 300), 1.25);
+        assert_eq!(child, (500, 375));
+        assert_ne!(child, (800, 600));
+        assert_ne!(child, child_surface_size((400, 300), 2.0));
+        // Zero/invalid scale falls back to identity, not density.
+        assert_eq!(child_surface_size((400, 300), 0.0), (400, 300));
     }
 }

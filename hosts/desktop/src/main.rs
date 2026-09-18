@@ -34,7 +34,7 @@ include!("plan.rs");
 include!("supervisor.rs");
 include!("buttons.rs");
 
-use geometry::{PresentationGeometry, RenderSignature};
+use geometry::{PresentationGeometry, RenderSignature, ViewportPolicy, resolve_geometry};
 
 fn text_worker(pak: Vec<u8>) -> OffloadWorker {
     OffloadWorker::spawn(move || {
@@ -201,26 +201,47 @@ impl Runtime {
                     }
                 }
             }
-            Input::Resize(geometry) if !self.args.fixed => {
-                let (w, h) = geometry.logical();
-                self.viewport = (w, h);
-                self.geometry = geometry;
-                self.surface
-                    .with_ui(|ui| ui.set_viewport(w as f32, h as f32));
-                self.guest.eval(
-                    "resize",
-                    &format!("globalThis.__pocketResizeViewport?.({w},{h})"),
-                )?;
-                self.svc(json!({
-                    "t":"resize",
-                    "w":w,
-                    "h":h,
-                    "scale":geometry.effective_render_scale(),
-                    "physical_w":geometry.physical_w,
-                    "physical_h":geometry.physical_h,
-                }));
+            Input::Resize(live) => {
+                // `fixed` freezes Product logical layout only. Physical
+                // client size + live scale remain presentation authority
+                // (monitor DPI change still resizes a size-locked window).
+                if self.args.fixed {
+                    let (w, h) = self.viewport;
+                    self.geometry = PresentationGeometry::from_live(
+                        (w, h),
+                        live.physical(),
+                        live.effective_render_scale() as f64,
+                    );
+                    // No ui.set_viewport / __pocketResizeViewport — layout stays fixed.
+                    self.svc(json!({
+                        "t":"resize",
+                        "w":w,
+                        "h":h,
+                        "scale":self.geometry.effective_render_scale(),
+                        "physical_w":self.geometry.physical_w,
+                        "physical_h":self.geometry.physical_h,
+                        "fixed":true,
+                    }));
+                } else {
+                    let (w, h) = live.logical();
+                    self.viewport = (w, h);
+                    self.geometry = live;
+                    self.surface
+                        .with_ui(|ui| ui.set_viewport(w as f32, h as f32));
+                    self.guest.eval(
+                        "resize",
+                        &format!("globalThis.__pocketResizeViewport?.({w},{h})"),
+                    )?;
+                    self.svc(json!({
+                        "t":"resize",
+                        "w":w,
+                        "h":h,
+                        "scale":self.geometry.effective_render_scale(),
+                        "physical_w":self.geometry.physical_w,
+                        "physical_h":self.geometry.physical_h,
+                    }));
+                }
             }
-            _ => {}
         }
         Ok(true)
     }
@@ -386,7 +407,7 @@ fn run_runtime(
             let target = if signature != Some(next) {
                 let start = Instant::now();
                 let geo = runtime.geometry;
-                log::info!(
+                log::debug!(
                     "R1 render: logical={}x{} os_scale={} package_density={} retained={}x{} scale_bits={:?}",
                     geo.logical_w,
                     geo.logical_h,
@@ -571,9 +592,9 @@ impl ApplicationHandler<Wake> for Host {
         };
         let gpu = presentation.gpu.clone();
         self.surface = Some(presentation);
-        // Corrective A: capture the ACTUAL physical client size + live OS
-        // scale after the window exists. Do not rebuild physical as
-        // logical × scale.
+        // Corrective A: measured physical + live OS scale. Fixed apps keep
+        // the product logical viewport; dynamic apps derive logical from
+        // the measurement. Never rebuild physical as logical × scale.
         let physical = window.inner_size();
         let os_scale = window.scale_factor();
         let package_density = self
@@ -581,18 +602,20 @@ impl ApplicationHandler<Wake> for Host {
             .as_ref()
             .map(|s| s.args.density)
             .unwrap_or(2);
-        let logical = (
-            (physical.width as f64 / os_scale)
-                .round()
-                .clamp(240.0, 4096.0) as u32,
-            (physical.height as f64 / os_scale)
-                .round()
-                .clamp(180.0, 4096.0) as u32,
+        let policy = if self.fixed {
+            ViewportPolicy::Fixed
+        } else {
+            ViewportPolicy::Dynamic
+        };
+        let product_logical = self.viewport;
+        let initial_geometry = resolve_geometry(
+            policy,
+            product_logical,
+            (physical.width, physical.height),
+            os_scale,
         );
-        let initial_geometry =
-            PresentationGeometry::from_live(logical, (physical.width, physical.height), os_scale);
-        log::info!(
-            "R1 boot geometry: logical={}x{} physical={}x{} os_scale={} package_density={}",
+        log::debug!(
+            "R1 boot geometry: policy={policy:?} logical={}x{} physical={}x{} os_scale={} package_density={}",
             initial_geometry.logical_w,
             initial_geometry.logical_h,
             initial_geometry.physical_w,
@@ -723,16 +746,18 @@ impl ApplicationHandler<Wake> for Host {
                 }
             }
             WindowEvent::Resized(size) => {
-                // Physical client size is authority — preserve it across the
-                // worker boundary. Logical viewport is derived for UI layout.
+                // Physical client size is authority. Fixed vs dynamic only
+                // changes how logical layout is resolved downstream.
                 let Some(window) = self.window.clone() else { return };
                 let scale = window.scale_factor();
-                let logical = (
-                    (size.width as f64 / scale).round().clamp(240.0, 4096.0) as u32,
-                    (size.height as f64 / scale).round().clamp(180.0, 4096.0) as u32,
-                );
-                let geometry = PresentationGeometry::from_live(
-                    logical,
+                let policy = if self.fixed {
+                    ViewportPolicy::Fixed
+                } else {
+                    ViewportPolicy::Dynamic
+                };
+                let geometry = resolve_geometry(
+                    policy,
+                    self.viewport,
                     (size.width, size.height),
                     scale,
                 );
@@ -742,16 +767,14 @@ impl ApplicationHandler<Wake> for Host {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let Some(window) = self.window.clone() else { return };
                 let size = window.inner_size();
-                let logical = (
-                    (size.width as f64 / scale_factor)
-                        .round()
-                        .clamp(240.0, 4096.0) as u32,
-                    (size.height as f64 / scale_factor)
-                        .round()
-                        .clamp(180.0, 4096.0) as u32,
-                );
-                let geometry = PresentationGeometry::from_live(
-                    logical,
+                let policy = if self.fixed {
+                    ViewportPolicy::Fixed
+                } else {
+                    ViewportPolicy::Dynamic
+                };
+                let geometry = resolve_geometry(
+                    policy,
+                    self.viewport,
                     (size.width, size.height),
                     scale_factor,
                 );
