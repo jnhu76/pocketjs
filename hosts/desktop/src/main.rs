@@ -101,7 +101,11 @@ struct Runtime {
     wire: Option<net::SvcWire>,
 }
 impl Runtime {
-    fn boot(args: Args, geometry: PresentationGeometry) -> Result<Self> {
+    fn boot(
+        args: Args,
+        geometry: PresentationGeometry,
+        usable_image_dim: u32,
+    ) -> Result<Self> {
         if args.native_text {
             return Err(anyhow!(
                 "text.layout.native is unavailable; use the portable text offload capability"
@@ -118,7 +122,10 @@ impl Runtime {
         surface.set_tick_rate(60);
         surface.set_svc_allowlist(args.companions.clone());
         surface.feed_pak(&pak);
-        let supervisor = AppSupervisor::new(args.system.as_ref(), &surface)?;
+        // AppSupervisor installs the same created-device image capability on
+        // this root surface and on every AppInstance child it later opens.
+        let supervisor =
+            AppSupervisor::new(args.system.as_ref(), &surface, usable_image_dim)?;
         let guest = Guest::new()?;
         surface.mount(&guest)?;
         let offload = text_worker(pak);
@@ -382,8 +389,13 @@ fn run_runtime(
     let available = Arc::new(AtomicBool::new(true));
     // Execution authority: the created device, not adapter marketing support.
     let usable_image_dim = gpu.device.limits().max_texture_dimension_2d;
+    log::info!(
+        "pocket-desktop-host image capability: device_max_texture_dimension_2d={usable_image_dim}"
+    );
     let mut renderer = gpu::Renderer::new(gpu);
-    let mut runtime = Runtime::boot(args, initial_geometry)?;
+    let mut runtime = Runtime::boot(args, initial_geometry, usable_image_dim)?;
+    // Belt-and-suspenders: Runtime/AppSupervisor already installed the fact
+    // on root + children; re-assert the root ceiling from the created device.
     runtime
         .surface
         .with_ui(|ui| ui.set_image_max_texture_dim(usable_image_dim));

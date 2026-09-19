@@ -13,6 +13,54 @@ mod tests {
     }
 
     #[test]
+    fn child_surfaces_inherit_created_device_image_capability() {
+        // Root + every AppInstance surface owned by one Desktop runtime must
+        // receive the same immutable created-device capability fact.
+        let device_image_dim = 16384u32;
+        let shell = UiSurface::new((16.0, 16.0));
+        assert_eq!(
+            shell.with_ui(|ui| ui.image_max_texture_dim()),
+            pocketjs_core::NATIVE_TEX_MAX_DIM,
+            "fresh Ui starts at portable default"
+        );
+        let supervisor = AppSupervisor::new(None, &shell, device_image_dim).unwrap();
+        assert_eq!(supervisor.image_max_texture_dim(), device_image_dim);
+        assert_eq!(
+            shell.with_ui(|ui| ui.image_max_texture_dim()),
+            device_image_dim,
+            "root Desktop surface receives device truth at construction"
+        );
+
+        // Child construction path used by AppSupervisor::open.
+        let child = UiSurface::new((32.0, 32.0));
+        assert_eq!(
+            child.with_ui(|ui| ui.image_max_texture_dim()),
+            pocketjs_core::NATIVE_TEX_MAX_DIM,
+            "child before install still portable default"
+        );
+        supervisor.install_image_capability(&child);
+        assert_eq!(
+            child.with_ui(|ui| ui.image_max_texture_dim()),
+            device_image_dim,
+            "AppInstance surface inherits the same device ceiling as root"
+        );
+        assert_eq!(
+            child.with_ui(|ui| ui.image_max_texture_dim()),
+            shell.with_ui(|ui| ui.image_max_texture_dim()),
+            "root and child share one immutable capability fact"
+        );
+
+        // A second child opened later gets the same fact (not 8192, not a
+        // re-queried adapter value).
+        let child2 = UiSurface::new((48.0, 48.0));
+        supervisor.install_image_capability(&child2);
+        assert_eq!(
+            child2.with_ui(|ui| ui.image_max_texture_dim()),
+            device_image_dim
+        );
+    }
+
+    #[test]
     fn app_supervisor_uses_lifecycle_focus_and_shell_painter_order() {
         let mut facts = [
             SchedulingFact {

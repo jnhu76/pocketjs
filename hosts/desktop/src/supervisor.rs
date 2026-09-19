@@ -24,6 +24,10 @@ struct AppSupervisor {
     instances: Vec<AppInstance>,
     suppressed: HashSet<u32>,
     background_execution: String,
+    /// Immutable usable image dimension from the **created** device.
+    /// Every UiSurface this supervisor owns (root shell + AppInstance
+    /// children) must receive the same fact. Never re-query adapter here.
+    image_max_texture_dim: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +69,13 @@ fn scheduled_app_instances(facts: &[SchedulingFact]) -> Vec<usize> {
 }
 
 impl AppSupervisor {
-    fn new(system: Option<&ResolvedSystemPlan>, shell: &UiSurface) -> Result<Self> {
+    fn new(
+        system: Option<&ResolvedSystemPlan>,
+        shell: &UiSurface,
+        image_max_texture_dim: u32,
+    ) -> Result<Self> {
+        // One device fact for the whole Desktop runtime.
+        shell.with_ui(|ui| ui.set_image_max_texture_dim(image_max_texture_dim));
         let Some(system) = system else {
             return Ok(Self {
                 next_generation: 0,
@@ -73,6 +83,7 @@ impl AppSupervisor {
                 instances: Vec::new(),
                 suppressed: HashSet::new(),
                 background_execution: "suspend".into(),
+                image_max_texture_dim,
             });
         };
         system.validate_for_host()?;
@@ -97,7 +108,20 @@ impl AppSupervisor {
             instances: Vec::new(),
             suppressed: HashSet::new(),
             background_execution: system.lifecycle.background_execution.clone(),
+            image_max_texture_dim,
         })
+    }
+
+    /// Created-device image capability this runtime installed on its surfaces.
+    fn image_max_texture_dim(&self) -> u32 {
+        self.image_max_texture_dim
+    }
+
+    /// Install the same immutable device image capability on any UiSurface
+    /// owned by this Desktop runtime. Called for every newly created
+    /// AppInstance surface; root shell is set in `AppSupervisor::new`.
+    fn install_image_capability(&self, surface: &UiSurface) {
+        surface.with_ui(|ui| ui.set_image_max_texture_dim(self.image_max_texture_dim));
     }
 
     fn open(&mut self, surface_handle: u32) -> Result<bool> {
@@ -129,6 +153,10 @@ impl AppSupervisor {
             ),
             plan.viewport.raster_density,
         );
+        // Child surfaces inherit the same created-device capability as the
+        // root Desktop Ui — not the portable 8192 default, not a re-queried
+        // adapter fact.
+        self.install_image_capability(&surface);
         surface.set_identity(&plan.target.id, plan.target.host_abi);
         surface.set_tick_rate(TICK_HZ as u32);
         surface.feed_pak(&pak);
