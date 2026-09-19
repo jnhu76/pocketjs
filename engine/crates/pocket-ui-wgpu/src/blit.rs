@@ -234,4 +234,18 @@ mod tests {
             wgpu::FilterMode::Linear
         );
     }
+
+    /// R2: linear image textures carry a full GPU mip chain length.
+    #[test]
+    fn image_mip_level_count_is_floor_log2_plus_one() {
+        use crate::render::image_mip_level_count;
+        assert_eq!(image_mip_level_count(1, 1), 1);
+        assert_eq!(image_mip_level_count(2, 1), 2);
+        assert_eq!(image_mip_level_count(3, 3), 2);
+        assert_eq!(image_mip_level_count(4, 4), 3);
+        assert_eq!(image_mip_level_count(1254, 1254), 11);
+        // PicoView corpus photo: 8256×5504 → floor(log2(8256))+1 = 14.
+        assert_eq!(image_mip_level_count(8256, 5504), 14);
+        assert_eq!(image_mip_level_count(0, 0), 1);
+    }
 }

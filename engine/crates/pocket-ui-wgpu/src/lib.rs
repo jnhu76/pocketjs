@@ -19,7 +19,7 @@ mod render;
 
 pub use blit::{Blit, BlitFilter, BlitSet};
 pub use overlay::UiOverlay;
-pub use render::UiRenderer;
+pub use render::{UiRenderer, image_mip_level_count};
 // The backend-agnostic surface (UiSurface + pak walk) — re-exported so desktop
 // consumers (uihost, OpenStrike) stay source-compatible after the split.
 pub use pocket_ui_surface::{PakEntry, UiSurface, walk_pak};

@@ -66,6 +66,48 @@ const MODE_SOLID: u32 = 0;
 const MODE_IMAGE: u32 = 1;
 const MODE_GLYPH: u32 = 2;
 
+/// Full mip-chain length for a 2D image: `floor(log2(max(w, h))) + 1`.
+///
+/// Used when a linear image texture is admitted for minification (Fit /
+/// zoom-out). Level 0 is the admitted plane; deeper levels are generated on
+/// the GPU — never as a long-lived CPU pyramid.
+pub fn image_mip_level_count(width: u32, height: u32) -> u32 {
+    let max_dim = width.max(height).max(1);
+    32 - max_dim.leading_zeros()
+}
+
+/// GPU mip-chain generation: linear sample previous level → current level.
+/// Exact 2×-step centers land in the middle of the source 2×2, so bilinear
+/// is a box average for power-of-two steps; odd tails clamp via the sampler.
+const MIPGEN_WGSL: &str = r#"
+struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(i % 2u) * 4 - 1);
+    let y = f32(i32(i / 2u) * 4 - 1);
+    out.pos = vec4f(x, y, 0.0, 1.0);
+    out.uv = vec2f((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4f {
+    let dims = vec2f(textureDimensions(src));
+    let texel = vec2f(1.0) / dims;
+    var acc = vec4f(0.0);
+    acc += textureSample(src, samp, in.uv + texel * vec2f(-0.25, -0.25));
+    acc += textureSample(src, samp, in.uv + texel * vec2f( 0.25, -0.25));
+    acc += textureSample(src, samp, in.uv + texel * vec2f(-0.25,  0.25));
+    acc += textureSample(src, samp, in.uv + texel * vec2f( 0.25,  0.25));
+    return acc * 0.25;
+}
+"#;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TexBind {
     White,
@@ -93,9 +135,13 @@ pub struct UiRenderer {
     surfaces: HashMap<u32, SurfaceBind>,
     bind_layout: wgpu::BindGroupLayout,
     /// Linear sampler: fonts, the white pixel, and `TexView::linear` images.
+    /// `mipmap_filter` is Linear so admitted linear images can minify through
+    /// a GPU mip chain; single-level textures ignore the extra filter.
     sampler: wgpu::Sampler,
     /// Nearest sampler: images without the linear hint (the PSP default).
     sampler_nearest: wgpu::Sampler,
+    /// Full-screen pipeline that writes mip level N from level N-1.
+    mipgen_pipeline: wgpu::RenderPipeline,
     white: wgpu::BindGroup,
     fonts: Vec<Option<FontTexture>>,
     images: Vec<Option<ImageBind>>,
@@ -186,6 +232,7 @@ impl UiRenderer {
             label: Some("pocket-ui sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -193,6 +240,39 @@ impl UiRenderer {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
+        });
+        let mipgen_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pocket-ui mipgen"),
+            source: wgpu::ShaderSource::Wgsl(MIPGEN_WGSL.into()),
+        });
+        let mipgen_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pocket-ui mipgen pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &mipgen_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &mipgen_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: if target_format.is_srgb() {
+                        wgpu::TextureFormat::Rgba8UnormSrgb
+                    } else {
+                        wgpu::TextureFormat::Rgba8Unorm
+                    },
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
         });
 
         // 1x1 opaque white for untextured geometry.
@@ -251,6 +331,7 @@ impl UiRenderer {
             bind_layout,
             sampler,
             sampler_nearest,
+            mipgen_pipeline,
             white,
             fonts: Vec::new(),
             images: Vec::new(),
@@ -955,6 +1036,18 @@ impl UiRenderer {
         h: u32,
         linear: bool,
     ) -> wgpu::BindGroup {
+        // Linear images (PicoView photos / owned RGBA8 admission) minify
+        // through a GPU mip chain: upload level 0 once, generate the rest on
+        // device. Nearest images keep a single level (pixel-art / PSP default).
+        let mip_level_count = if linear {
+            image_mip_level_count(w, h)
+        } else {
+            1
+        };
+        let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        if mip_level_count > 1 {
+            usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
+        }
         let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pocket-ui image"),
             size: wgpu::Extent3d {
@@ -962,15 +1055,20 @@ impl UiRenderer {
                 height: h,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.image_format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage,
             view_formats: &[],
         });
         gpu.queue.write_texture(
-            tex.as_image_copy(),
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
@@ -983,6 +1081,9 @@ impl UiRenderer {
                 depth_or_array_layers: 1,
             },
         );
+        if mip_level_count > 1 {
+            self.generate_mips(gpu, &tex, w, h, mip_level_count);
+        }
         let view = tex.create_view(&Default::default());
         gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pocket-ui image bind"),
@@ -1002,6 +1103,77 @@ impl UiRenderer {
                 },
             ],
         })
+    }
+
+    /// Generate mip levels 1..N on the GPU from level 0. No CPU pyramid.
+    fn generate_mips(
+        &self,
+        gpu: &Gpu,
+        tex: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        mip_level_count: u32,
+    ) {
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pocket-ui image mipgen"),
+            });
+        let (mut src_w, mut src_h) = (width, height);
+        for level in 1..mip_level_count {
+            let dst_w = (src_w / 2).max(1);
+            let dst_h = (src_h / 2).max(1);
+            let src_view = tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("pocket-ui image mip src"),
+                base_mip_level: level - 1,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            let dst_view = tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("pocket-ui image mip dst"),
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("pocket-ui image mipgen bind"),
+                layout: &self.bind_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("pocket-ui image mipgen pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &dst_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.mipgen_pipeline);
+                pass.set_viewport(0.0, 0.0, dst_w as f32, dst_h as f32, 0.0, 1.0);
+                pass.set_scissor_rect(0, 0, dst_w, dst_h);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            src_w = dst_w;
+            src_h = dst_h;
+        }
+        gpu.queue.submit([encoder.finish()]);
     }
 }
 
