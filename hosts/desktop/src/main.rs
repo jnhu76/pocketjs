@@ -380,8 +380,13 @@ fn run_runtime(
     gpu: Arc<pocket3d::gpu::Gpu>,
 ) -> Result<()> {
     let available = Arc::new(AtomicBool::new(true));
+    // Execution authority: the created device, not adapter marketing support.
+    let usable_image_dim = gpu.device.limits().max_texture_dimension_2d;
     let mut renderer = gpu::Renderer::new(gpu);
     let mut runtime = Runtime::boot(args, initial_geometry)?;
+    runtime
+        .surface
+        .with_ui(|ui| ui.set_image_max_texture_dim(usable_image_dim));
     let mut signature: Option<RenderSignature> = None;
     let mut intents = Vec::new();
     let mut deadline = Instant::now();

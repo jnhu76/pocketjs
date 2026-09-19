@@ -68,11 +68,12 @@ const DEFAULT_TICK_HZ: u32 = 60;
 /// durations, and no display drives faster anyway.
 pub const MAX_TICK_HZ: u32 = 240;
 
-/// Largest per-side dimension `Ui::upload_owned_rgba8` admits. Matches the
-/// wgpu default `maxTextureDimension2d`; every in-tree Desktop host requests
-/// wgpu's default limits, so anything within this bound is creatable by the
-/// shared Desktop backend. Byte-reading backends have no creation-time
-/// dimension envelope at all.
+/// Portable default per-side dimension ceiling for `Ui::upload_owned_rgba8`.
+/// Matches the wgpu default `maxTextureDimension2d` and remains the ceiling
+/// until a host installs a usable image-capability fact
+/// (`Ui::set_image_max_texture_dim`) from the **created** device
+/// (`device.limits().max_texture_dimension_2d`). Byte-reading backends have
+/// no creation-time dimension envelope and keep this default.
 pub const NATIVE_TEX_MAX_DIM: u32 = 8192;
 
 /// Physical pixel backing of one texture record. Both representations expose
@@ -291,6 +292,10 @@ pub struct Ui {
     /// coordinates always remain logical; only core-owned bitmap resources
     /// (currently rounded-corner masks) use this density.
     raster_density: u32,
+    /// Usable per-side image dimension for `upload_owned_rgba8`. Defaults to
+    /// `NATIVE_TEX_MAX_DIM`. Desktop hosts set this from the created wgpu
+    /// device so logical admission cannot exceed what the backend can create.
+    image_max_texture_dim: u32,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
     focused: i32,
@@ -375,6 +380,7 @@ impl Ui {
             tex_free: Vec::new(),
             discs: draw::DiscCache::new(),
             raster_density,
+            image_max_texture_dim: NATIVE_TEX_MAX_DIM,
             raster_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
@@ -398,6 +404,20 @@ impl Ui {
     /// Raster pixels per logical UI pixel for core-owned bitmap resources.
     pub fn raster_density(&self) -> u32 {
         self.raster_density
+    }
+
+    /// Install the usable image-resource dimension ceiling from the host's
+    /// created backend device. Desktop hosts must pass
+    /// `device.limits().max_texture_dimension_2d` — not adapter-only support.
+    /// Values below 1 are clamped to 1. This does not invent product memory
+    /// policy; it only matches logical admission to backend creatability.
+    pub fn set_image_max_texture_dim(&mut self, dim: u32) {
+        self.image_max_texture_dim = dim.max(1);
+    }
+
+    /// Usable per-side dimension for `upload_owned_rgba8`.
+    pub fn image_max_texture_dim(&self) -> u32 {
+        self.image_max_texture_dim
     }
 
     /// Declare how many `tick()` calls make one second of virtual time
@@ -788,7 +808,9 @@ impl Ui {
     /// the `PSM_8888` tag under the same generation-tagged handles, content
     /// revisions, and free semantics as pak textures. Dimensions need not be
     /// powers of two (the pow-2 rule is the GE's upload-contract constraint,
-    /// not this path's); each side is capped at `NATIVE_TEX_MAX_DIM`.
+    /// not this path's); each side is capped at `image_max_texture_dim()`
+    /// (default `NATIVE_TEX_MAX_DIM`; Desktop hosts raise it to the created
+    /// device's `max_texture_dimension_2d`).
     /// Returns the handle, or -1 (with `pixels` dropped) for zero or
     /// oversized dimensions or a byte-count mismatch.
     ///
@@ -799,12 +821,21 @@ impl Ui {
     /// device backend on demand before drawing it; no device host uploads
     /// decoded images today.
     pub fn upload_owned_rgba8(&mut self, pixels: Vec<u8>, w: u32, h: u32, linear: bool) -> i32 {
-        if w == 0 || h == 0 || w > NATIVE_TEX_MAX_DIM || h > NATIVE_TEX_MAX_DIM {
+        let max = self.image_max_texture_dim;
+        if w == 0 || h == 0 || w > max || h > max {
             return -1;
         }
-        // w, h <= NATIVE_TEX_MAX_DIM bounds w * h * 4 at 2^28 bytes — no
-        // usize overflow on any target this crate builds for.
-        if pixels.len() != w as usize * h as usize * 4 {
+        // Guard the plane byte count against 64-bit overflow. A raised
+        // Desktop ceiling (e.g. 16384) keeps w*h*4 at 1 GiB, which is still
+        // well below usize::MAX on every 64-bit host that creates such
+        // devices; portable hosts keep the 8192 default.
+        let Some(byte_len) = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|px| px.checked_mul(4))
+        else {
+            return -1;
+        };
+        if pixels.len() != byte_len {
             return -1;
         }
         let tex = Texture {

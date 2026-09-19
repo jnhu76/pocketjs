@@ -47,8 +47,9 @@ The record's pixel bytes have two physical representations:
   store in place, which is what the alignment is for.
 - **An owned RGBA8 plane** (`Ui::upload_owned_rgba8`) backs host-decoded
   images: the caller's tight RGBA8 `Vec<u8>` — rows of `width * 4` bytes,
-  dimensions up to `NATIVE_TEX_MAX_DIM` (8192, the wgpu default
-  `maxTextureDimension2d`) — moves into the record with no intermediate
+  dimensions up to the Ui's installed image ceiling (`NATIVE_TEX_MAX_DIM`
+  8192 by default; Desktop hosts set `Ui::set_image_max_texture_dim` from
+  the created device's `max_texture_dimension_2d`) — moves into the record with no intermediate
   copy. The record carries the `PSM_8888` tag (RGBA byte order) under the
   same handles, revisions, and free semantics as pak textures.
 

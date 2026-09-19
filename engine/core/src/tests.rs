@@ -3999,3 +3999,35 @@ fn upload_owned_rgba8_handle_lifecycle_matches_pak_textures() {
     assert_eq!(ui.texture_slot_count(), 2); // slots stay allocated (free list)
     assert!(ui.texture(b).is_none() && ui.texture(c).is_none());
 }
+
+#[test]
+fn upload_owned_rgba8_ceiling_follows_installed_device_capability() {
+    // Default ceiling remains the portable NATIVE_TEX_MAX_DIM fact.
+    let mut ui = Ui::new();
+    assert_eq!(ui.image_max_texture_dim(), crate::NATIVE_TEX_MAX_DIM);
+    let four = alloc::vec![1u8, 2, 3, 4];
+    assert_eq!(ui.upload_owned_rgba8(four.clone(), 8193, 1, false), -1);
+
+    // A host that installed the created device's max_texture_dimension_2d
+    // may admit dimensions above the portable default, still bounded by the
+    // installed fact.
+    ui.set_image_max_texture_dim(16384);
+    assert_eq!(ui.image_max_texture_dim(), 16384);
+    let plane = alloc::vec![9u8; 8256 * 2 * 4];
+    let handle = ui.upload_owned_rgba8(plane, 8256, 2, true);
+    assert!(
+        handle >= 0,
+        "capability-truthful ceiling must admit 8256 when device exposes 16384"
+    );
+    let view = ui.texture(handle).expect("capability-raised admission");
+    assert_eq!((view.w, view.h), (8256, 2));
+
+    // Still rejects dimensions above the installed capability.
+    assert_eq!(ui.upload_owned_rgba8(four.clone(), 16385, 1, false), -1);
+    // Byte-count mismatch still rejects even when dimension fits.
+    assert_eq!(ui.upload_owned_rgba8(alloc::vec![1u8; 3], 1, 1, false), -1);
+    // Hostile/zero values clamp the ceiling to 1, not unlimited.
+    ui.set_image_max_texture_dim(0);
+    assert_eq!(ui.image_max_texture_dim(), 1);
+    assert_eq!(ui.upload_owned_rgba8(four, 2, 1, false), -1);
+}

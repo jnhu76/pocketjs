@@ -104,22 +104,88 @@ impl Gpu {
             info.device_type,
             power_preference
         );
+        let required_limits = desktop_image_required_limits(&adapter.limits());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("pocket3d"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,
             })
             .await
             .context("failed to create wgpu device")?;
+        log::info!(
+            "device limits: max_texture_dimension_2d={} (adapter {})",
+            device.limits().max_texture_dimension_2d,
+            adapter.limits().max_texture_dimension_2d
+        );
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
         })
+    }
+}
+
+/// Required device limits for generic Desktop image-resource capability.
+///
+/// Starts from `wgpu::Limits::default()` and raises **only** the generic
+/// limit that gates 2D image admission/upload (`max_texture_dimension_2d`),
+/// bounded by what the adapter can actually provide. Other default limits
+/// stay unchanged — this is not a blanket "request adapter max" path.
+///
+/// After `request_device`, `device.limits().max_texture_dimension_2d` is the
+/// execution authority hosts must export to logical image admission. Adapter
+/// support alone is not sufficient.
+pub fn desktop_image_required_limits(adapter_limits: &wgpu::Limits) -> wgpu::Limits {
+    let mut required = wgpu::Limits::default();
+    required.max_texture_dimension_2d = adapter_limits.max_texture_dimension_2d;
+    required
+}
+
+#[cfg(test)]
+mod image_capability_tests {
+    use super::desktop_image_required_limits;
+
+    #[test]
+    fn desktop_image_required_limits_raises_only_image_dimension() {
+        let default = wgpu::Limits::default();
+        let mut adapter = default.clone();
+        adapter.max_texture_dimension_2d = 16384;
+        adapter.max_buffer_size = u64::MAX;
+        adapter.max_bind_groups = 8;
+        adapter.max_texture_array_layers = 2048;
+
+        let required = desktop_image_required_limits(&adapter);
+        assert_eq!(required.max_texture_dimension_2d, 16384);
+        // Unrelated default limits stay untouched — no blanket adapter-max request.
+        assert_eq!(required.max_buffer_size, default.max_buffer_size);
+        assert_eq!(required.max_bind_groups, default.max_bind_groups);
+        assert_eq!(required.max_texture_array_layers, default.max_texture_array_layers);
+        assert_eq!(
+            required.max_uniform_buffer_binding_size,
+            default.max_uniform_buffer_binding_size
+        );
+    }
+
+    #[test]
+    fn desktop_image_required_limits_respects_weaker_adapters() {
+        let mut adapter = wgpu::Limits::default();
+        adapter.max_texture_dimension_2d = 4096;
+        let required = desktop_image_required_limits(&adapter);
+        assert_eq!(required.max_texture_dimension_2d, 4096);
+    }
+
+    #[test]
+    fn desktop_image_required_limits_keeps_default_when_adapter_matches() {
+        let adapter = wgpu::Limits::default();
+        let required = desktop_image_required_limits(&adapter);
+        assert_eq!(
+            required.max_texture_dimension_2d,
+            wgpu::Limits::default().max_texture_dimension_2d
+        );
     }
 }
 
